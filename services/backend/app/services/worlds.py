@@ -160,8 +160,12 @@ def edge_accessible(edge):
 def validate_graph(graph):
     check(graph, 'world.schema.json', '#/properties/navigationGraph')
     ids = [node['id'] for node in graph['nodes']]
-    if len(set(ids)) != len(ids):
+    unique = set(ids)
+    if len(unique) != len(ids):
         raise HTTPException(400, 'Duplicate node IDs')
+    # The per-edge membership test below scans this: against a list it is O(edges x nodes), and a
+    # mesh-derived graph has hundreds of each.
+    ids = unique
     if any(e['from'] not in ids or e['to'] not in ids or e['from'] == e['to'] for e in graph['edges']):
         raise HTTPException(400, 'Invalid graph edge')
     floors = {n['id']: n.get('floor') for n in graph['nodes']}
@@ -451,6 +455,8 @@ class WorldStore:
         self._committer = None
         self.locks = {}
         self.sockets = {}
+        # Digest of the manifest bytes each world last validated with; see world().
+        self._validated = {}
 
     def lock(self, key):
         return self.locks.setdefault(key, asyncio.Lock())
@@ -530,10 +536,27 @@ class WorldStore:
                 await asyncio.sleep(self.commit_delay)
 
     def world(self, world_id):
-        world = check(self.read('worlds', world_id, 'world.json'), 'world.schema.json')
+        """The world manifest, validated. Validation is memoised on the manifest bytes: it costs
+        ~16 ms once the navigation graph comes from the navmesh, and every /localize (five a
+        second), every pose and every query upload reads a world, so revalidating unchanged bytes
+        was most of what this process did between uploads. The file is still read and parsed each
+        call, so callers keep getting a dict of their own to mutate."""
+        path = self.path('worlds', world_id, 'world.json')
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            raise HTTPException(404, 'Not found')
+        try:
+            world = json.loads(raw)
+        except ValueError:
+            raise HTTPException(400, 'World manifest is not valid JSON')
+        digest = hashlib.blake2b(raw, digest_size=16).digest()
+        if self._validated.get(world_id) != digest:
+            check(world, 'world.schema.json')
+            validate_graph(world.get('navigationGraph', {'nodes': [], 'edges': []}))
+            self._validated[world_id] = digest
         if world['id'] != world_id:
             raise HTTPException(400, 'Manifest ID differs from its directory')
-        validate_graph(world.get('navigationGraph', {'nodes': [], 'edges': []}))
         return world
 
     def session(self, session_id):

@@ -13,7 +13,7 @@ struct MapHazard: Decodable, Equatable, Sendable {
 }
 
 /// `GET /worlds/{id}/occupancy`: the splat voxelised into the world frame.
-struct MapOccupancyPayload: Decodable, Sendable {
+struct MapOccupancyPayload: Decodable, Equatable, Sendable {
     let cellSize: Float
     let origin: [Float]
     let size: [Int32]

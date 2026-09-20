@@ -490,3 +490,20 @@ def test_proposal_preserves_places_and_rejects_stale_acceptance(client):
     proposal = client.post(url + '/navmesh', json={}).json()
     assert client.patch(url, json={'meshFrame': 'splat'}).status_code == 200
     assert client.put(url + '/graph', json=proposal['graph'], headers={'If-Match': proposal['sourceRevision']}).status_code == 412
+
+
+def test_world_validation_is_memoised_but_never_stale(client, settings, world):
+    """Manifest validation is cached on the file's bytes, so an edit made behind the API -- a
+    script, a restored backup -- still has to pass before the next request can use it."""
+    path = settings.wander_data_root / 'worlds' / world['id'] / 'world.json'
+    assert client.get(f"/worlds/{world['id']}").status_code == 200
+    # Same bytes, served from the memo.
+    assert client.get(f"/worlds/{world['id']}").status_code == 200
+
+    broken = {**world, 'navigationGraph': {'nodes': world['navigationGraph']['nodes'],
+                                           'edges': [{'from': 'nowhere', 'to': 'nowhere-else'}]}}
+    path.write_text(json.dumps(broken), encoding='utf-8')
+    assert client.get(f"/worlds/{world['id']}").status_code == 400, 'an edited manifest is revalidated'
+
+    path.write_text(json.dumps(world), encoding='utf-8')
+    assert client.get(f"/worlds/{world['id']}").status_code == 200, 'and accepted again once fixed'

@@ -52,6 +52,15 @@ final class FrontPipeline: ObservableObject {
     /// anchor, so the last good fix is held for `mapMaxFixAge` across those gaps.
     var mapMinConfidence: Float = 0.3
     var mapMaxFixAge: TimeInterval = 10
+    /// How often hazards are re-fetched while walking: they are small, and they change as the
+    /// viewer is annotated, which has to reach a phone that is already running.
+    var mapRefreshInterval: TimeInterval = 30
+    /// The grid is large and only changes on a re-scan or a forced rebuild, so it is re-fetched
+    /// far less often than the hazards it ships with.
+    var occupancyRefreshInterval: TimeInterval = 300
+    private var lastOccupancyFetch: Date?
+    /// What the current `staticMap` was built from, so an unchanged refresh swaps nothing.
+    private var mapPayload: (occupancy: MapOccupancyPayload, hazards: [MapHazard])?
     private var lastGoodFix: (fix: LocalizationFix, at: Date)?
     /// What the backend hears about each fix; holds the last tracked anchor across VPS gaps for
     /// the same `mapMaxFixAge`, and only an anchor as confident as `mapMinConfidence`, so the voice
@@ -363,7 +372,8 @@ final class FrontPipeline: ObservableObject {
         }
     }
 
-    /// Fetch the world's occupancy grid and hazards once the world id is known.
+    /// Fetch the world's occupancy grid and hazards once the world id is known, then keep them
+    /// fresh for as long as the session runs.
     private func loadStaticMap(settings: CameraSettings) {
         mapTask?.cancel()
         guard let base = settings.backendBaseURL, !settings.backendAPIKey.isEmpty else {
@@ -380,28 +390,63 @@ final class FrontPipeline: ObservableObject {
                 waited += 1
                 worldId = self?.reporter.worldId
             }
-            guard let self, let worldId, !Task.isCancelled else { return }
-            if worldId == self.mapWorldId, self.staticMap != nil { return }
-            self.mapStatus = "loading \(worldId)"
-            do {
-                let payload = try await client.occupancy(worldId: worldId)
-                let hazards = (try? await client.hazards(worldId: worldId)) ?? []
-                guard let map = StaticMap(payload: payload, hazards: hazards) else {
-                    self.mapStatus = "bad occupancy payload"
-                    return
-                }
-                self.staticMap = map
-                self.mapWorldId = worldId
-                self.mapStatus = "\(map.cellCount) cells · \(hazards.count) hazards"
-            } catch {
-                self.mapStatus = "map: \(error.localizedDescription)"
+            guard let worldId, !Task.isCancelled else { return }
+            // Weakly, like pollPulses: this loop outlives the first fetch and must not hold the
+            // pipeline alive through its sleeps.
+            while !Task.isCancelled {
+                if let self { await self.refreshStaticMap(client: client, worldId: worldId) } else { return }
+                try? await Task.sleep(for: .seconds(self?.mapRefreshInterval ?? 30))
             }
+        }
+    }
+
+    /// One refresh of the world's map. An unchanged answer swaps nothing, and a failed refresh
+    /// leaves the map the phone is already walking on in place -- a stale map beats no map.
+    private func refreshStaticMap(client: WanderBackendClient, worldId: String) async {
+        let loaded = staticMap != nil && worldId == mapWorldId
+        if !loaded { mapStatus = "loading \(worldId)" }
+        do {
+            // A hazards blip must not empty a working map. On the first load it is optional:
+            // the grid on its own is still worth having.
+            let hazards: [MapHazard]
+            if loaded {
+                hazards = try await client.hazards(worldId: worldId)
+            } else {
+                hazards = (try? await client.hazards(worldId: worldId)) ?? []
+            }
+            var payload = loaded ? mapPayload?.occupancy : nil
+            if payload == nil || Date().timeIntervalSince(lastOccupancyFetch ?? .distantPast) >= occupancyRefreshInterval {
+                payload = try await client.occupancy(worldId: worldId)
+                lastOccupancyFetch = Date()
+            }
+            guard let payload, !Task.isCancelled else { return }
+            if loaded, let current = mapPayload, current.occupancy == payload, current.hazards == hazards { return }
+            guard let map = StaticMap(payload: payload, hazards: hazards) else {
+                mapStatus = "bad occupancy payload"
+                return
+            }
+            staticMap = map
+            mapWorldId = worldId
+            mapPayload = (payload, hazards)
+            mapStatus = "\(map.cellCount) cells · \(hazards.count) hazards"
+        } catch {
+            // Only say so when there is nothing to fall back on; a blip mid-walk is not news.
+            if !loaded { mapStatus = "map: \(error.localizedDescription)" }
         }
     }
 
     private func stopLocalization() {
         pulseTask?.cancel()
         mapTask?.cancel()
+        // The map goes with the session. Kept, it outlives Stop/Start and a world switch, and the
+        // phone keeps ray-casting a grid and hazards that may be many edits old until the app dies.
+        staticMap = nil
+        mapWorldId = nil
+        mapPayload = nil
+        lastOccupancyFetch = nil
+        mapReading = nil
+        lastGoodFix = nil
+        mapStatus = "not loaded"
         queryLoop.stop()
         localizer.stop()
         // The call is bound to the reporter's session; a reset (new backend/world) ends it too.

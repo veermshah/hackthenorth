@@ -607,10 +607,14 @@ async def localization_map_cameras(world_id: str, request: Request, revision: st
     return await get_cameras.remote.aio(world_id, revision or world['version'])
 
 
-def localizations_index(store, world_id):
+def localizations_index(store, world_id, validate=True):
+    """The stored query index. `validate=False` on the upload path: re-validating the whole
+    index there costs ~13 ms once it holds its 50 records (0.3 ms when the world is new), inside
+    the lock and on the event loop, which is throughput the phone's next upload is waiting for.
+    Every record was validated on the way in, and the readers below still validate."""
     if store.path('worlds', world_id, 'localizations', 'index.json').exists():
-        return check(store.read('worlds', world_id, 'localizations', 'index.json'),
-                     'navigation.schema.json', '#/$defs/localizationQueries')
+        index = store.read('worlds', world_id, 'localizations', 'index.json')
+        return check(index, 'navigation.schema.json', '#/$defs/localizationQueries') if validate else index
     return {'schema': 'wander.localizations/v1', 'worldId': world_id, 'queries': []}
 
 
@@ -653,7 +657,7 @@ async def localize_query(world_id: str, request: Request):
 
     async with store.lock('localizations:' + world_id):
         await store.write_bytes(image, 'worlds', world_id, 'localizations', query_id + '.jpg')
-        index = localizations_index(store, world_id)
+        index = localizations_index(store, world_id, validate=False)
         kept, evicted = index['queries'][:LOCALIZATIONS_KEPT - 1], index['queries'][LOCALIZATIONS_KEPT - 1:]
         for old in evicted:
             store.path('worlds', world_id, 'localizations', old['id'] + '.jpg').unlink(missing_ok=True)

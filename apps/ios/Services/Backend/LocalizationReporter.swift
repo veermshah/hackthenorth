@@ -251,7 +251,10 @@ final class LocalizationReporter: ObservableObject {
     func report(queries: [VPSImageQuery], currentPose: SitePose?) {
         guard uploadQueryImages, client != nil, worldId != nil else { return }
         let eligible = queries.filter { $0.succeeded || uploadFailedQueries }
-        guard let newest = eligible.last else { return }
+        // Only one query per batch survives the single upload slot, so pick the one worth keeping:
+        // a successful query carries the pose the viewer draws and that auto-detect and the
+        // annotator place pins from. Failures still go up when a batch has nothing better.
+        guard let newest = eligible.last(where: { $0.succeeded }) ?? eligible.last else { return }
         queriesSkipped += max(0, eligible.count - 1)
         if queryInFlight {
             if queuedQuery != nil { queriesSkipped += 1 }
