@@ -148,16 +148,22 @@ final class FrontPipeline: ObservableObject {
             .sink { [weak self] error in self?.voiceError = error }
             .store(in: &forwarding)
 
-        // SwiftUI only observes this object, so republish the children's changes.
+        // SwiftUI only observes this object, so republish the children's changes — throttled,
+        // because every send here rebuilds the whole front screen and `arSession` counts frames at
+        // 60 Hz. Ten times a second is plenty for status readouts; the camera preview and the
+        // pipeline's own @Published values (zones, note pins, voiceError) are unaffected.
+        // `voice` is deliberately absent: `VoiceCallCard` observes it directly, so captions stay
+        // immediate without dragging the rest of the screen along at audio-chunk rate.
         for child in [arSession.objectWillChange.eraseToAnyPublisher(),
                       queryLoop.objectWillChange.eraseToAnyPublisher(),
                       speech.objectWillChange.eraseToAnyPublisher(),
                       link.objectWillChange.eraseToAnyPublisher(),
                       localizer.objectWillChange.eraseToAnyPublisher(),
                       notes.objectWillChange.eraseToAnyPublisher(),
-                      reporter.objectWillChange.eraseToAnyPublisher(),
-                      voice.objectWillChange.eraseToAnyPublisher()] {
-            child.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarding)
+                      reporter.objectWillChange.eraseToAnyPublisher()] {
+            child.throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &forwarding)
         }
     }
 

@@ -87,6 +87,8 @@ final class VoiceCallController: ObservableObject {
     private var senderTask: Task<Void, Never>?
     private var frames: AsyncStream<Data>.Continuation?
     private var speakingTimer: Task<Void, Never>?
+    /// When the guide is considered to have stopped speaking; extended by each audio chunk.
+    private var speakingUntil: ContinuousClock.Instant?
     private var audioStarted = false
     private var captionCounter = 0
     private let captionLimit = 12
@@ -260,6 +262,7 @@ final class VoiceCallController: ObservableObject {
     private func finish() {
         speakingTimer?.cancel()
         speakingTimer = nil
+        speakingUntil = nil
         receiveTask?.cancel()
         receiveTask = nil
         senderTask?.cancel()
@@ -302,13 +305,23 @@ final class VoiceCallController: ObservableObject {
 
     private func markSpeaking() {
         guard state == .listening || state == .speaking else { return }
-        state = .speaking
-        speakingTimer?.cancel()
-        let hold = speakingHold
+        // Audio arrives in small chunks. Re-publishing `state` and rebuilding the hold timer on each
+        // one rebuilds the whole front screen dozens of times a second, on top of ARKit at 60 Hz.
+        // Extend a deadline that one running timer reads instead, and publish only real changes.
+        speakingUntil = ContinuousClock.now.advanced(by: speakingHold)
+        if state != .speaking { state = .speaking }
+        guard speakingTimer == nil else { return }
         speakingTimer = Task { [weak self] in
-            try? await Task.sleep(for: hold)
-            guard let self, !Task.isCancelled, self.state == .speaking else { return }
-            self.state = .listening
+            while true {
+                guard let self, let until = self.speakingUntil else { return }
+                if ContinuousClock.now >= until { break }
+                try? await Task.sleep(until: until, clock: .continuous)
+                if Task.isCancelled { return }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.speakingTimer = nil
+            self.speakingUntil = nil
+            if self.state == .speaking { self.state = .listening }
         }
     }
 

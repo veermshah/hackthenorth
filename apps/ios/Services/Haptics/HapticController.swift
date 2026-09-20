@@ -23,7 +23,16 @@ final class HapticController: ObservableObject {
         guard isAvailable else { return }
         do {
             engine = try CHHapticEngine()
+            // Haptics only, so the engine stops sharing the audio session: a voice call switches the
+            // session to .playAndRecord/.voiceChat and deactivates it on hang-up, which would
+            // otherwise stop the buzzes mid-walk on the chest phone.
+            engine?.playsHapticsOnly = true
             engine?.resetHandler = { [weak self] in
+                Task { @MainActor in try? self?.engine?.start() }
+            }
+            // Interruptions and app suspension stop the engine; bring it back so buzzing resumes.
+            engine?.stoppedHandler = { [weak self] reason in
+                guard reason != .engineDestroyed else { return }
                 Task { @MainActor in try? self?.engine?.start() }
             }
             try engine?.start()

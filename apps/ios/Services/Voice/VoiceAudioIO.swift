@@ -32,8 +32,10 @@ enum VoiceAudioError: Error, LocalizedError {
 final class CaptureState: @unchecked Sendable {
     private struct Guarded {
         var converter: AVAudioConverter?
+        var inputFormat: AVAudioFormat?
         var chunker = PCMChunker()
         var muted = false
+        var rebuilds = 0
         var onFrame: (@Sendable (Data) -> Void)?
         var onLevel: (@Sendable (Float) -> Void)?
     }
@@ -46,14 +48,26 @@ final class CaptureState: @unchecked Sendable {
         self.target = target
     }
 
-    func reset(converter: AVAudioConverter?, onFrame: (@Sendable (Data) -> Void)?, onLevel: (@Sendable (Float) -> Void)?) {
-        lock.withLockUnchecked { state in
-            state.converter = converter
+    /// Point the capture at `inputFormat`, or `nil` to tear it down. False when no converter to
+    /// 24 kHz Int16 exists for that format, which the caller reports as `VoiceAudioError.converter`.
+    @discardableResult
+    func reset(inputFormat: AVAudioFormat?, onFrame: (@Sendable (Data) -> Void)?, onLevel: (@Sendable (Float) -> Void)?) -> Bool {
+        lock.withLockUnchecked { state -> Bool in
             state.chunker = PCMChunker()
             state.onFrame = onFrame
             state.onLevel = onLevel
+            state.inputFormat = inputFormat
+            guard let inputFormat else {
+                state.converter = nil
+                return true
+            }
+            state.converter = AVAudioConverter(from: inputFormat, to: target)
+            return state.converter != nil
         }
     }
+
+    /// How often a buffer arrived in a format the converter was not built for; diagnostics only.
+    var rebuildCount: Int { lock.withLockUnchecked { $0.rebuilds } }
 
     func setMuted(_ muted: Bool) {
         lock.withLockUnchecked { $0.muted = muted }
@@ -61,14 +75,28 @@ final class CaptureState: @unchecked Sendable {
 
     /// Called on the audio thread with the hardware-format buffer from the input tap.
     func process(_ buffer: AVAudioPCMBuffer) {
+        let format = buffer.format
+        // A route change (Bluetooth, a headset, the speaker/receiver switch) can hand the tap a new
+        // hardware format before the main-queue configuration-change handler has rebuilt the engine.
+        // Converting such a buffer with the previous converter raises an Objective-C exception that
+        // Swift cannot catch, so every buffer is checked and the converter replaced in place. The
+        // zero checks also keep the capacity arithmetic below off infinity and NaN.
+        guard format.sampleRate > 0, format.channelCount > 0, buffer.frameLength > 0 else { return }
         var frames: [Data] = []
         var level: Float = 0
         var callbacks: ((@Sendable (Data) -> Void)?, (@Sendable (Float) -> Void)?) = (nil, nil)
         lock.withLockUnchecked { state in
+            guard let current = state.inputFormat else { return }
+            if !current.isEqual(format) {
+                guard let rebuilt = AVAudioConverter(from: format, to: target) else { return }
+                state.converter = rebuilt
+                state.inputFormat = format
+                state.chunker = PCMChunker()
+                state.rebuilds += 1
+            }
             guard let converter = state.converter else { return }
-            let ratio = target.sampleRate / buffer.format.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
-            guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+            let converted = Double(buffer.frameLength) * target.sampleRate / format.sampleRate
+            guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(converted.rounded(.up)) + 16) else { return }
             var consumed = false
             var error: NSError?
             let status = converter.convert(to: out, error: &error) { _, outStatus in
@@ -106,6 +134,9 @@ final class CaptureState: @unchecked Sendable {
 final class VoiceAudioIO: ObservableObject, VoiceAudio {
     @Published private(set) var inputLevel: Float = 0
     @Published private(set) var isRunning = false
+    /// False when Apple's voice-processing unit refused to start: the guide will hear itself
+    /// through the loudspeaker. Diagnostics for the console; the call runs either way.
+    private(set) var echoCancellation = true
 
     /// Playback committed to the player node at any time.
     var aheadSeconds: Double = 0.25
@@ -150,29 +181,42 @@ final class VoiceAudioIO: ObservableObject, VoiceAudio {
         // without it the chest speaker's reply feeds straight back into the request. It has to be
         // set on a stopped engine and it changes the input format, so it comes before the read below.
         if !input.isVoiceProcessingEnabled {
-            try? input.setVoiceProcessingEnabled(true)
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                echoCancellation = true
+            } catch {
+                // Not fatal: the call still works, and on a headset nothing is lost. On the
+                // loudspeaker the guide hears itself, so say so rather than swallowing it.
+                echoCancellation = false
+                print("[voice] voice processing unavailable, echo cancellation is off: \(error)")
+            }
         }
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else { throw VoiceAudioError.noInput }
-        guard let converter = AVAudioConverter(from: inputFormat, to: target) else { throw VoiceAudioError.converter }
-        capture.reset(converter: converter, onFrame: onFrame, onLevel: { [weak self] level in
+        guard capture.reset(inputFormat: inputFormat, onFrame: onFrame, onLevel: { [weak self] level in
             Task { @MainActor in self?.inputLevel = level }
-        })
+        }) else { throw VoiceAudioError.converter }
         capture.setMuted(muted)
         input.removeTap(onBus: 0)
         let capture = self.capture
         input.installTap(onBus: 0, bufferSize: 2400, format: inputFormat) { buffer, _ in
             capture.process(buffer)
         }
+        // Attach once, but rewire on every start: a configuration change can leave the player
+        // disconnected, and play()/scheduleBuffer on a disconnected node raises an Objective-C
+        // exception. Reconnecting a connected node is a no-op, so this is cheap.
         if !attached {
             engine.attach(player)
-            engine.connect(player, to: engine.mainMixerNode, format: output)
             attached = true
         }
+        engine.disconnectNodeOutput(player)
+        engine.connect(player, to: engine.mainMixerNode, format: output)
         engine.prepare()
         try engine.start()
         player.play()
         isRunning = true
+        // A restart mid-sentence left the rest of the answer queued here; keep playing it.
+        pump()
     }
 
     private func pause() {
@@ -198,7 +242,7 @@ final class VoiceAudioIO: ObservableObject, VoiceAudio {
         pause()
         pending.removeAll()
         onFrame = nil
-        capture.reset(converter: nil, onFrame: nil, onLevel: nil)
+        capture.reset(inputFormat: nil, onFrame: nil, onLevel: nil)
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
