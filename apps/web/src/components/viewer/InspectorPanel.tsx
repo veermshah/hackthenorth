@@ -62,8 +62,9 @@ type Props = {
   onFocusNote: (id: string) => void;
   onUpdateNote: (id: string, patch: Partial<Pick<WorldNote, "title" | "location" | "description">>) => void;
   onDeleteNote: (id: string) => void;
-  /** Replaces the pin list after POST /api/worlds/:id/notes/auto-detect adds new pins. */
+  /** Merges newly detected pins without replacing edits made during detection. */
   onNotesDetected: (notes: WorldNote[]) => void;
+  onBeforeDetectNotes: () => Promise<void>;
   onStartNote: () => void;
   onStartMeasure: () => void;
   onLabelMeasurement: (id: string, label: string) => void;
@@ -154,6 +155,7 @@ function NotesTab(p: Props) {
     setDetecting(true);
     setDetectMessage(null);
     try {
+      await p.onBeforeDetectNotes();
       const res = await fetch(`/api/worlds/${encodeURIComponent(p.worldId)}/notes/auto-detect`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -261,12 +263,16 @@ function NoteEditor({
   const [location, setLocation] = useState(note.location ?? "");
   const [description, setDescription] = useState(note.description ?? "");
 
-  const commit = () =>
+  const commit = () => {
+    setTitle(title.trim() || "Untitled pin");
+    setLocation(location.trim());
+    setDescription(description.trim());
     onChange({
       title: title.trim() || "Untitled pin",
       location: location.trim() || undefined,
       description: description.trim() || undefined,
     });
+  };
 
   return (
     <div className="mx-2 mt-1 mb-2 space-y-2 rounded-lg border border-hairline bg-stellar-white p-2.5">
@@ -280,7 +286,10 @@ function NoteEditor({
           value={title}
           placeholder="e.g. Broken handrail"
           autoFocus
-          onChange={(e) => setTitle(e.target.value)}
+          onChange={(e) => {
+            setTitle(e.target.value);
+            onChange({ title: e.target.value.trim() || "Untitled pin" });
+          }}
           onBlur={commit}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
         />
@@ -294,7 +303,10 @@ function NoteEditor({
           className="input mt-1 py-1 text-body-sm"
           value={location}
           placeholder="e.g. 2nd floor, outside room 204"
-          onChange={(e) => setLocation(e.target.value)}
+          onChange={(e) => {
+            setLocation(e.target.value);
+            onChange({ location: e.target.value || undefined });
+          }}
           onBlur={commit}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
         />
@@ -308,7 +320,10 @@ function NoteEditor({
           className="input mt-1 min-h-[72px] resize-y py-1 text-body-sm"
           value={description}
           placeholder="What should someone know at this spot?"
-          onChange={(e) => setDescription(e.target.value)}
+          onChange={(e) => {
+            setDescription(e.target.value);
+            onChange({ description: e.target.value || undefined });
+          }}
           onBlur={commit}
         />
       </div>
@@ -374,8 +389,8 @@ function MeasureTab(p: Props) {
                 aria-label={`Label for measurement ${i + 1}`}
                 className="min-w-0 flex-1 rounded-sm bg-transparent px-1 py-0.5 text-body-sm text-void-black placeholder:text-void-black/40 focus:bg-pure-white focus:outline-none focus:ring-2 focus:ring-wander-blue/20"
                 placeholder="Add a label"
-                defaultValue={m.label ?? ""}
-                key={`${m.id}-${m.label ?? ""}`}
+                value={m.label ?? ""}
+                onChange={(e) => p.onLabelMeasurement(m.id, e.target.value)}
                 onBlur={(e) => e.target.value.trim() !== (m.label ?? "") && p.onLabelMeasurement(m.id, e.target.value.trim())}
                 onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
               />

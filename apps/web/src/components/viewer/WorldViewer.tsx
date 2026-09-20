@@ -32,6 +32,8 @@ import { PHONE_ONLINE_MS, useLocalizationFeed, useNow } from "./useLocalizationF
 import { useMeshTools } from "./useMeshTools";
 import { useSplatViewer, type PickHandler } from "./useSplatViewer";
 import { ViewerOverlay } from "./ViewerOverlays";
+import { useAutosave } from "./useAutosave";
+import type { SaveState } from "@/lib/autosave";
 
 type Props = {
   worldId: string;
@@ -64,10 +66,6 @@ const TOOLS: { id: ViewerTool; label: string; icon: IconName; key: string }[] = 
   { id: "measure", label: "Measure", icon: "ruler", key: "2" },
   { id: "note", label: "Add pin", icon: "pin", key: "3" },
 ];
-
-const AUTOSAVE_MS = 900;
-
-type SaveState = { status: "clean" | "dirty" | "saving" | "saved" | "error"; error?: string };
 
 const isEditing = () => {
   const el = document.activeElement;
@@ -105,6 +103,7 @@ export function WorldViewer({
   /** What the engine draws: the generated proposal while it is being previewed, else the live graph. */
   const shownGraph = meshTools.preview && meshTools.proposal ? meshTools.proposal.graph : graph;
   const [notes, setNotes] = useState(initialNotes);
+  const knownNoteIds = useRef(new Set(initialNotes.map((note) => note.id)));
   const [measurements, setMeasurements] = useState(initialMeasurements);
   const [selection, setSelection] = useState<ViewerSelection | null>(null);
   const [pendingPoint, setPendingPoint] = useState<Vec3 | null>(null);
@@ -201,11 +200,10 @@ export function WorldViewer({
   );
 
   /* -------------------------------------------------------------- autosave */
-  const notesSave = useAutosave(`/api/worlds/${encodeURIComponent(worldId)}/notes`, { notes }, notes, canSave);
+  const notesSave = useAutosave(`/api/worlds/${encodeURIComponent(worldId)}/notes`, { notes }, canSave);
   const measureSave = useAutosave(
     `/api/worlds/${encodeURIComponent(worldId)}/measurements`,
     { measurements },
-    measurements,
     canSave,
   );
   const save = combineSave(notesSave.state, measureSave.state);
@@ -213,7 +211,8 @@ export function WorldViewer({
 
   /* ------------------------------------------------------------ mutations */
   const addNote = useCallback((position: Vec3) => {
-    const id = `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = `note-${crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
+    knownNoteIds.current.add(id);
     setNotes((list) => [
       ...list,
       { id, title: `Pin ${list.length + 1}`, position, createdAt: new Date().toISOString() },
@@ -244,7 +243,7 @@ export function WorldViewer({
   const addMeasurement = useCallback((a: Vec3, b: Vec3) => {
     setMeasurements((list) => [
       ...list,
-      { id: `m-${Date.now().toString(36)}`, points: [a, b], createdAt: new Date().toISOString() },
+      { id: `m-${crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`, points: [a, b], createdAt: new Date().toISOString() },
     ]);
     setPanelTab("measure");
   }, []);
@@ -271,6 +270,10 @@ export function WorldViewer({
       if (e.tool === "note") addNote(e.point);
       else if (e.tool === "measure") {
         if (pendingPoint) {
+          if (Math.hypot(...pendingPoint.map((v, i) => v - e.point[i])) < 0.001) {
+            setNotice({ tone: "error", text: "Choose a different second point to measure a distance." });
+            return;
+          }
           addMeasurement(pendingPoint, e.point);
           setPendingPoint(null);
         } else setPendingPoint(e.point);
@@ -306,9 +309,13 @@ export function WorldViewer({
   const pickTool = useCallback(
     (tool: ViewerTool) => {
       api.setTool(tool);
+      setSelection(null);
       if (tool !== "measure") setPendingPoint(null);
-      if (tool === "note") setPanelTab("notes");
-      if (tool === "measure") setPanelTab("measure");
+      if (tool === "note" || tool === "measure") {
+        setPanelOpen(true);
+        setPanelTab(tool === "note" ? "notes" : "measure");
+        setFollowChoice("off");
+      }
       focusViewer();
     },
     [api, focusViewer],
@@ -320,8 +327,8 @@ export function WorldViewer({
       if (e.metaKey || e.ctrlKey || e.altKey || isEditing()) return;
       if (e.key === "Escape") {
         if (pendingPoint) setPendingPoint(null);
-        else if (selection) setSelection(null);
         else if (state.tool !== "navigate") pickTool("navigate");
+        else if (selection) setSelection(null);
         return;
       }
       if ((e.key === "Delete" || e.key === "Backspace") && selection?.kind === "note") {
@@ -351,7 +358,7 @@ export function WorldViewer({
   }, [dirty]);
 
   /* ---------------------------------------------------------------- render */
-  const interactive = state.status === "ready" || state.status === "empty";
+  const interactive = state.status === "ready" || state.status === "empty" || state.mesh.status === "ready";
   const meta = STATUS_META[status];
   const hint = hintFor(state.tool, state.mode, !!pendingPoint);
 
@@ -516,14 +523,24 @@ export function WorldViewer({
               }}
               onUpdateNote={updateNote}
               onDeleteNote={deleteNote}
-              onNotesDetected={setNotes}
+              onBeforeDetectNotes={notesSave.flush}
+              onNotesDetected={(detected) => {
+                // Detection returns a server snapshot. Preserve edits and deletions made
+                // while it was running, and append only previously unseen pins.
+                const added = detected.filter((note) => !knownNoteIds.current.has(note.id));
+                for (const note of added) knownNoteIds.current.add(note.id);
+                setNotes((current) => [...current, ...added]);
+              }}
               onStartNote={() => pickTool("note")}
               onStartMeasure={() => pickTool("measure")}
               onLabelMeasurement={(id, label) =>
                 setMeasurements((list) => list.map((m) => (m.id === id ? { ...m, label: label || undefined } : m)))
               }
               onDeleteMeasurement={(id) => setMeasurements((list) => list.filter((m) => m.id !== id))}
-              onClearMeasurements={() => setMeasurements([])}
+              onClearMeasurements={() => {
+                setMeasurements([]);
+                setPendingPoint(null);
+              }}
               onUploadSplat={manifest ? () => setUploadOpen(true) : undefined}
               onSaveSiteId={manifest ? saveSiteId : undefined}
             />
@@ -703,48 +720,6 @@ function hintFor(tool: ViewerTool, mode: ViewerMode, pending: boolean): string {
 }
 
 /* -------------------------------------------------------------- autosave */
-
-/**
- * PUTs `body` to `url` shortly after `value` changes (debounced). Reports a
- * small state machine for the header badge; `retry()` re-sends after an error.
- */
-function useAutosave<T>(url: string, body: unknown, value: T, enabled: boolean) {
-  const [state, setState] = useState<SaveState>({ status: "clean" });
-  const saved = useRef(value);
-  const [attempt, setAttempt] = useState(0);
-  const bodyRef = useRef(body);
-  useEffect(() => {
-    bodyRef.current = body;
-  }, [body]);
-
-  useEffect(() => {
-    if (!enabled || value === saved.current) return;
-    setState({ status: "dirty" });
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      setState({ status: "saving" });
-      try {
-        const res = await fetch(url, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(bodyRef.current),
-        });
-        if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `Save failed (${res.status})`);
-        if (cancelled) return;
-        saved.current = value;
-        setState({ status: "saved" });
-      } catch (err) {
-        if (!cancelled) setState({ status: "error", error: err instanceof Error ? err.message : "Save failed" });
-      }
-    }, AUTOSAVE_MS);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [url, value, enabled, attempt]);
-
-  return { state, retry: () => setAttempt((n) => n + 1) };
-}
 
 function combineSave(a: SaveState, b: SaveState): SaveState {
   const order: SaveState["status"][] = ["error", "saving", "dirty", "saved", "clean"];

@@ -131,6 +131,42 @@ session is created up front (`POST /sessions`) when the voice call starts before
 The call survives socket drops (three reconnects with backoff, microphone kept running) and Live
 renewals; the typed field on the card sends text through the same path for the simulator.
 
+### Directional buzzes along the route
+
+Guidance is felt as well as heard, and the buzz **pushes** the wearer: whichever mount fires is
+the one shoving them, so they move away from it. Nothing has to be learned — the body already
+reads a shove as "go the other way".
+
+| Buzz | Means |
+| --- | --- |
+| Back phone | Walk forward |
+| Right phone | Move left |
+| Left phone | Move right |
+| Chest phone | Turn around |
+| All four at once | You have arrived |
+
+Every push is two short firm bumps; arrival is three on every mount together, because a push from
+all sides is a push nowhere and cannot be misread as a direction.
+
+Every `POST /sessions/{id}/pose` answer goes through `RouteCuePolicy` (`Services/Haptics`), which
+sends a `RouteCue` over the peer link to the mount that should push — or plays it locally when that
+mount is the chest. The backend recomputes `instruction.turn` from the wearer's *current* heading
+towards the next node on every pose, so this is steering rather than a schedule: the push keeps
+coming while they face the wrong way and stops once they are pointed down the leg. The back mount
+then taps once to confirm the correction landed (`confirmForward`); it never fires on its own, or a
+straight leg would buzz the whole way down it and mean nothing.
+
+Route cues and obstacle warnings share the same mounts, so they are kept apart two ways: a route cue
+is a countable burst of short firm bumps while an obstacle is a continuous pulse that quickens as it
+nears, and `HapticController.tap` drops a cue while that mount is already warning about an obstacle
+(the voice still speaks the turn). Drift under 45 degrees is ignored by default (`cueSlightTurns`),
+the same nudge is not re-sent inside `repeatInterval` (5 s), and `off-route`, `lost` and `localizing`
+send nothing at all because no heading is trustworthy there. A push needs its mount to be linked,
+except the chest, which owns its own haptics; both screens show what was sent and received.
+
+Like spoken guidance, this rides on the pose loop, so it needs a Niantic VPS fix — without one the
+backend has a route but no position to steer from.
+
 ### Connecting to a world by QR code
 
 The web viewer shows a QR code per world (Live tab, or the phone button in the header)

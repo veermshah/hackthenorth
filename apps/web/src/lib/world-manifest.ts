@@ -273,10 +273,15 @@ export function validateGraph(g: unknown, path = "graph"): string[] {
 export function validateMeasurements(input: unknown): string[] {
   if (!Array.isArray(input)) return ["measurements must be an array"];
   const errs: string[] = [];
+  const ids = new Set<string>();
   input.forEach((m, i) => {
     if (!isObj(m) || !isStr(m.id) || !Array.isArray(m.points) || m.points.length !== 2 || !m.points.every((p) => isVec(p, 3)))
       errs.push(`measurements[${i}] needs id and points[2][3]`);
     else if (m.label !== undefined && !isStr(m.label)) errs.push(`measurements[${i}].label must be a string`);
+    if (isObj(m) && isStr(m.id)) {
+      if (ids.has(m.id)) errs.push(`measurements[${i}] duplicate id "${m.id}"`);
+      ids.add(m.id);
+    }
   });
   return errs;
 }

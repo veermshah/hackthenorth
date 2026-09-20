@@ -32,7 +32,6 @@ final class FrontPipeline: ObservableObject {
     @Published private(set) var notePins: [NotePin] = []
     /// Size of the preview the overlay draws into, reported by `NoteOverlay`.
     var overlaySize: CGSize = .zero
-    private var lastReportedFix: LocalizationFix?
     private var lastCameraTransform = matrix_identity_float4x4
     private var lastNoteUpdate: TimeInterval = 0
     /// Ranking and projecting notes is cheap but pointless at frame rate.
@@ -54,6 +53,9 @@ final class FrontPipeline: ObservableObject {
     var mapMinConfidence: Float = 0.3
     var mapMaxFixAge: TimeInterval = 10
     private var lastGoodFix: (fix: LocalizationFix, at: Date)?
+    /// What the backend hears about each fix; holds the last tracked anchor across VPS gaps for
+    /// the same `mapMaxFixAge` so the voice guide's view of localization matches the haptics'.
+    private var reportPolicy = LocalizationReportPolicy()
     private var staticMap: StaticMap?
     private var mapWorldId: String?
     private var mapTask: Task<Void, Never>?
@@ -63,6 +65,11 @@ final class FrontPipeline: ObservableObject {
     @Published private(set) var pulsesRelayed = 0
     var pulsePollInterval: TimeInterval = 0.4
     private var policy = ObstacleCuePolicy()
+    /// Route turns into taps on the side and back mounts.
+    private var routeCues = RouteCuePolicy()
+    @Published private(set) var routeCuesSent = 0
+    /// The last cue that went out, for the Navigation card.
+    @Published private(set) var lastRouteCue: RouteCue?
     private var lastDetection: TimeInterval = 0
     private let detectionInterval: TimeInterval = 1.0 / 15
     private var placeholderFrame: FrameSnapshot?
@@ -126,13 +133,36 @@ final class FrontPipeline: ObservableObject {
             self?.speech.speak(SpokenCue(text: phrase, priority: .route))
         }
 
+        // The same guidance reaches the body as well as the ear, as a push: whichever mount
+        // buzzes is shoving the wearer, so they move away from it. This runs whether or not a
+        // voice call is up — it is the one cue they can follow with headphones in, in a loud
+        // corridor, or mid-sentence with the guide. A cue aimed at the chest is played here;
+        // the rest go out over the link to the mount that owns them.
+        reporter.onProgress = { [weak self] progress in
+            guard let self else { return }
+            let cues = self.routeCues.decide(progress, connected: self.link.connectedRoles)
+            guard let first = cues.first else { return }
+            for cue in cues {
+                if cue.role == .front {
+                    self.haptics.tap(times: cue.kind.taps)
+                } else {
+                    self.link.send(.route(cue), to: [cue.role])
+                }
+            }
+            self.lastRouteCue = first
+            self.routeCuesSent += 1
+            print("[route] \(first.kind.rawValue) -> \(cues.map(\.role.rawValue).joined(separator: ",")) at \(first.atNode)")
+        }
+
         // The voice guide changes guidance on the backend; mirror it so the pose loop and the
         // navigation card agree with what the wearer just heard.
         voice.onAction = { [weak self] action in
             switch action.type {
             case "set_destination":
+                self?.routeCues.reset()
                 self?.reporter.adopt(destinationId: action.destinationId, name: action.destinationName)
             case "stop_navigation":
+                self?.routeCues.reset()
                 self?.reporter.adopt(destinationId: nil, name: nil)
             default:
                 break
@@ -263,7 +293,7 @@ final class FrontPipeline: ObservableObject {
                 let fmt: (Float?) -> String = { $0.map { String(format: "%.2f", $0) } ?? "-" }
                 let sides = self.sideClearances.map { "\($0.key.rawValue)=\(fmt($0.value.nearest))" }.joined(separator: ",")
                 let q = self.localizer.queryStats
-                print("[front] ar=\(self.arSession.state) frames=\(self.arSession.frameCount) L=\(fmt(z.left)) C=\(fmt(z.center)) R=\(fmt(z.right)) gap=\(String(format: "%.2f", z.gapDirection)) link=\(self.link.connectedRoles.map(\.rawValue)) sides=[\(sides)] haptics=\(self.lastDecision.haptics) query=\(self.queryLoop.stats.ticks) vps=\(self.localizer.phase.label) queries=\(q.issued)/\(q.succeeded)ok/\(q.failed)fail/\(q.rejected)rej uploaded=\(self.reporter.queriesSent)")
+                print("[front] ar=\(self.arSession.state) frames=\(self.arSession.frameCount) L=\(fmt(z.left)) C=\(fmt(z.center)) R=\(fmt(z.right)) gap=\(String(format: "%.2f", z.gapDirection)) link=\(self.link.connectedRoles.map(\.rawValue)) sides=[\(sides)] haptics=\(self.lastDecision.haptics) routeCues=\(self.routeCuesSent) query=\(self.queryLoop.stats.ticks) vps=\(self.localizer.phase.label) queries=\(q.issued)/\(q.succeeded)ok/\(q.failed)fail/\(q.rejected)rej uploaded=\(self.reporter.queriesSent)")
             }
         }
     }
@@ -272,6 +302,8 @@ final class FrontPipeline: ObservableObject {
         statusTask?.cancel()
         relocalizeTask?.cancel()
         haptics.stopPulsing()
+        haptics.stopTapping()
+        routeCues.reset()
         link.send(.haptic(.none))
         stopLocalization()
         arSession.stop()
@@ -374,6 +406,7 @@ final class FrontPipeline: ObservableObject {
         // The call is bound to the reporter's session; a reset (new backend/world) ends it too.
         voice.end()
         reporter.reset()
+        reportPolicy.reset()
         usingNSDK = false
     }
 
@@ -390,12 +423,7 @@ final class FrontPipeline: ObservableObject {
         if usingNSDK {
             localizer.update(frame: frame)
             if let fix = localizer.latestFix {
-                if fix != lastReportedFix {
-                    lastReportedFix = fix
-                    reporter.report(fix: fix)
-                } else if fix.state != .lost {
-                    reporter.report(cameraTransform: frame.cameraTransform, using: fix)
-                }
+                report(fix: fix, cameraTransform: frame.cameraTransform)
             }
         }
         // Ahead of the detection guard: notes must keep updating between the detector's slower ticks.
@@ -440,6 +468,16 @@ final class FrontPipeline: ObservableObject {
             link.send(.haptic(command))
             lastSentHaptics = command
             lastHapticSend = now
+        }
+    }
+
+    /// Feed the backend from this frame's fix; see `LocalizationReportPolicy` for the hold across VPS gaps.
+    private func report(fix: LocalizationFix, cameraTransform: simd_float4x4) {
+        reportPolicy.maxAge = mapMaxFixAge
+        switch reportPolicy.decide(fix) {
+        case .fix(let changed): reporter.report(fix: changed)
+        case .pose(let anchor): reporter.report(cameraTransform: cameraTransform, using: anchor)
+        case .skip: break
         }
     }
 

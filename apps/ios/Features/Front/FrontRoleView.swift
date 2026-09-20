@@ -189,6 +189,11 @@ struct FrontRoleView: View {
             if let spoken = pipeline.speech.lastSpoken {
                 StatRow(label: "Last spoken", value: spoken)
             }
+            // The mount that buzzed is the one pushing, so the wearer moves away from it.
+            StatRow(label: "Buzz cues", value: pipeline.lastRouteCue.map {
+                "\($0.kind.rawValue) · pushed from \($0.role.rawValue) · \(pipeline.routeCuesSent) sent"
+            } ?? (pipeline.routeCuesSent == 0 ? "none yet" : "\(pipeline.routeCuesSent) sent"),
+                    identifier: "front.routeCue")
         }
         .card()
     }

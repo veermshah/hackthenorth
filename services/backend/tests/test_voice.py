@@ -382,7 +382,8 @@ async def test_situation_and_catalogue_follow_the_persisted_session(world_store)
     sid = session['sessionId']
     seed = catalogue_seed(world_store, sid)
     assert 'Front entrance, Lobby desk, Elevator bank, Room 101' in seed and 'Bed 1, Water fountain' in seed
-    assert situation(world_store, sid) == 'Position unknown: no current localization fix. No destination set.'
+    assert situation(world_store, sid) == ('Position unknown right now (the phone has not localized yet); if asked, '
+                                           'delegate to the backend for the latest fix. No destination set.')
     from datetime import datetime, timezone
     stamp = datetime.now(timezone.utc).isoformat()
     # Identity rotation faces -Z: the fountain (0,0,-3) is ahead, Bed 1 (2,0,0) is to the right.
@@ -400,6 +401,59 @@ async def test_situation_and_catalogue_follow_the_persisted_session(world_store)
     text = situation(world_store, sid)
     assert 'Guidance to Room 101: navigating, 14 m remaining. Current cue:' in text
     assert situation(world_store, 'missing') is None and catalogue_seed(world_store, 'missing') is None
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_context_and_situation_agree_on_localization(settings, world_store, monkeypatch):
+    """"Where am I" is answered by get_current_location while the Live model reads situation(); both must
+    apply the same test (tracked pose, refreshed within POSE_MAX_AGE_S on the server clock) or the voice
+    tells a localized wearer they are not, and the agent's context contradicts its own tool."""
+    from datetime import datetime, timezone
+    from ..app.services import worlds as worlds_module
+    from ..scripts.fixtures import FixtureEvents, FixtureSearch, ScriptedModel
+    model = ScriptedModel([('get_current_location', {}), 'ok'] * 4)
+    app = create_app(settings, model=model, events=FixtureEvents(), search=FixtureSearch())
+    navigation, agent = app.state.world_navigation, app.state.agent
+    sid = (await navigation.create('demo-building', 'phone'))['sessionId']
+
+    async def where_am_i():
+        result = await agent.query(sid, 'Where am I?')
+        tool = result['tool_calls'][0]['result']['data']
+        dynamic = next(m['content'] for m in model.requests[-1] if str(m.get('content', '')).startswith('<application_context>'))
+        return tool, json.loads(dynamic.split('\n')[1])
+
+    def pose(tracking='localized'):
+        return navigation.pose(sid, {'timestamp': datetime.now(timezone.utc).isoformat(), 'trackingState': tracking,
+                                     'pose': {'position': [0, 0, 0], 'rotation': [0, 0, 0, 1]}}, allow_no_destination=True)
+
+    # No pose yet: everyone says unknown, and says why.
+    tool, context = await where_am_i()
+    assert tool['localized'] is False and tool['reason'] == 'no pose received yet' and context['pose'] is None
+    assert 'has not localized yet' in situation(world_store, sid)
+
+    # Tracked pose: everyone says localized, with the same nearest place.
+    await pose()
+    tool, context = await where_am_i()
+    assert tool['localized'] is True and tool['nearestNode']['name'] == 'Front entrance'
+    assert context['localization']['localized'] is True and context['nearby_notes']
+    assert situation(world_store, sid).startswith('Position: 0 m from Front entrance.')
+
+    # The SDK reports a notTracked gap: the backend is told, so everyone says lost.
+    await pose('lost')
+    tool, context = await where_am_i()
+    assert tool['localized'] is False and tool['reason'] == 'tracking lost' and context['localization']['localized'] is False
+    assert 'tracking is lost' in situation(world_store, sid)
+
+    # Tracking returns, then the phone goes quiet: the persisted session still says localizing with a pose,
+    # but a pose nobody refreshed for POSE_MAX_AGE_S is stale for the tool, the context and the voice alike.
+    await pose()
+    real = time.time
+    monkeypatch.setattr(time, 'time', lambda: real() + worlds_module.POSE_MAX_AGE_S + 1)
+    assert world_store.session(sid)['state'] == 'localizing'
+    tool, context = await where_am_i()
+    assert tool['localized'] is False and tool['reason'] == 'last pose is stale'
+    assert context['localization']['localized'] is False and context['nearby_notes'] == []
+    assert 'stopped sending poses' in situation(world_store, sid)
 
 
 @pytest.mark.asyncio

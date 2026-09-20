@@ -20,6 +20,22 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Viewer regression checks
+
+Run `npm test`, `npm run lint`, and `npx tsc --noEmit` from this directory.
+The tests use Node's test runner and the installed TypeScript compiler; no browser
+or live backend is required. They cover placement gestures, Walk pointer capture,
+world-coordinate measurements, marker interception, pending endpoints, serialized
+autosaves, duplicate IDs, and local storage failure handling.
+
+For manual checks, open a world and try Measure (2) and Add pin (3) in both Orbit
+and Walk, with Splat and Mesh layers. A drag should never create a pin. Existing
+markers should not block placement, repeated endpoints should keep the measurement
+pending, and Escape should cancel it. Edit a pin title or measurement label, wait
+for Saved, and reload to confirm persistence. Measurements use world-frame metres
+after the manifest alignment; splat hits follow Gaussian surfaces while mesh hits
+follow triangles.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

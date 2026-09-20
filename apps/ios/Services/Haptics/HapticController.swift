@@ -17,6 +17,7 @@ final class HapticController: ObservableObject {
 
     private var engine: CHHapticEngine?
     private var pulseTask: Task<Void, Never>?
+    private var tapTask: Task<Void, Never>?
 
     init() {
         isAvailable = CHHapticEngine.capabilitiesForHardware().supportsHaptics
@@ -59,6 +60,9 @@ final class HapticController: ObservableObject {
             return
         }
         guard !isPulsing else { return } // the running loop reads currentPulse each beat
+        // An obstacle outranks a route cue on the same mount.
+        tapTask?.cancel()
+        tapTask = nil
         isPulsing = true
         pulseTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -79,6 +83,34 @@ final class HapticController: ObservableObject {
         pulseTask = nil
         isPulsing = false
         currentPulse = nil
+    }
+
+    /// A short burst of firm bumps: the route's rhythm, told apart from an obstacle by being
+    /// a countable burst rather than a pulse that quickens as something nears. Skipped while
+    /// this mount is warning about an obstacle, because two meanings felt at once are worse
+    /// than one missed — the voice still speaks the turn.
+    func tap(times: Int, interval: TimeInterval = 0.18, duration: TimeInterval = 0.09) {
+        guard !isPulsing else { return }
+        let count = max(1, min(times, 4))
+        tapTask?.cancel()
+        tapTask = Task { [weak self] in
+            for index in 0..<count {
+                guard let self, !Task.isCancelled, !self.isPulsing else { return }
+                self.buzzCount += 1
+                self.lastBuzz = Date()
+                // Short and sharp, but still a continuous event: a transient tap is lost
+                // through a strap or a pocket, which is where these phones live.
+                self.play(eventType: .hapticContinuous, intensity: 1, sharpness: 0.8, duration: duration)
+                if index < count - 1 { try? await Task.sleep(for: .seconds(interval)) }
+            }
+            if !Task.isCancelled { self?.tapTask = nil }
+        }
+    }
+
+    /// Drop a burst still in flight, e.g. when the screen stops.
+    func stopTapping() {
+        tapTask?.cancel()
+        tapTask = nil
     }
 
     private func play(eventType: CHHapticEvent.EventType, intensity: Float, sharpness: Float, duration: TimeInterval) {

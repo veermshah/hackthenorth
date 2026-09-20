@@ -63,12 +63,14 @@ export class CameraKeyControls {
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
     private readonly element: HTMLElement,
+    private readonly pointerElement: HTMLElement = element,
   ) {
     this.syncFromCamera();
-    this.listen(element, "pointerdown", this.onPointerDown);
-    this.listen(element, "pointermove", this.onPointerMove);
-    this.listen(element, "pointerup", this.onPointerUp);
-    this.listen(element, "pointercancel", this.onPointerUp);
+    this.listen(pointerElement, "pointerdown", this.onPointerDown);
+    this.listen(pointerElement, "pointermove", this.onPointerMove);
+    this.listen(pointerElement, "pointerup", this.onPointerUp);
+    this.listen(pointerElement, "pointercancel", this.onPointerUp);
+    this.listen(pointerElement, "lostpointercapture", this.onPointerUp);
     this.listen(element, "keydown", this.onKeyDown);
     this.listen(element, "keyup", this.onKeyUp);
     this.listen(element, "blur", () => this.keys.clear());
@@ -132,7 +134,7 @@ export class CameraKeyControls {
   private onPointerDown = (e: PointerEvent) => {
     if (!this.enabled || !this.dragLook || (e.pointerType === "mouse" && e.button !== 0)) return;
     this.drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
-    this.element.setPointerCapture(e.pointerId);
+    this.pointerElement.setPointerCapture(e.pointerId);
   };
 
   private onPointerMove = (e: PointerEvent) => {
@@ -147,7 +149,7 @@ export class CameraKeyControls {
   private onPointerUp = (e: PointerEvent) => {
     if (this.drag?.id !== e.pointerId) return;
     this.drag = null;
-    if (this.element.hasPointerCapture(e.pointerId)) this.element.releasePointerCapture(e.pointerId);
+    if (this.pointerElement.hasPointerCapture(e.pointerId)) this.pointerElement.releasePointerCapture(e.pointerId);
   };
 
   private onKeyDown = (e: KeyboardEvent) => {

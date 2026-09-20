@@ -24,7 +24,7 @@ export function ViewerOverlay({
   /** Opens the upload dialog; only offered when the world has a manifest to attach the file to. */
   onUpload?: () => void;
 }) {
-  if (state.status === "ready") return null;
+  if (state.status === "ready" || state.mesh.status === "ready") return null;
 
   const version = manifest?.version ?? "v1";
   const expectedPath = manifest?.assets.splat ?? `worlds/${worldId}/${version}/scene.spz`;

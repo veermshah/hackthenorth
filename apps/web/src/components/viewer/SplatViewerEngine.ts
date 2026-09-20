@@ -4,6 +4,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import { type Alignment, type Measurement, type NavigationGraph, type NavNodeKind, type Vec3, type WorldNote, edgeAccessible } from "@/lib/world-manifest";
 import { CameraKeyControls } from "./CameraKeyControls";
+import { PlacementGesture } from "./PlacementGesture";
 
 export type ViewerMode = "orbit" | "walk";
 export type ViewerTool = "navigate" | "measure" | "note";
@@ -119,7 +120,7 @@ const PORTRAIT_ROLL = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(
 const LABEL_CLASS =
   "absolute left-0 top-0 whitespace-nowrap rounded-full border border-hairline bg-pure-white/95 px-2 py-0.5 text-caption font-medium text-void-black will-change-transform";
 const PIN_CLASS =
-  "absolute left-0 top-0 flex cursor-pointer select-none flex-col items-center gap-0.5 will-change-transform pointer-events-auto";
+  "absolute left-0 top-0 flex cursor-pointer select-none flex-col items-center gap-0.5 will-change-transform pointer-events-auto rounded-lg focus-visible:outline-2 focus-visible:outline-wander-blue";
 const PIN_CHIP_CLASS =
   "whitespace-nowrap rounded-full border px-2 py-0.5 text-caption font-medium transition-colors duration-200";
 const PIN_CHIP_IDLE = "border-hairline bg-pure-white/95 text-void-black";
@@ -231,7 +232,7 @@ export class SplatViewerEngine {
   private mode: ViewerMode = "orbit";
   private tool: ViewerTool = "navigate";
   private pendingPoint: THREE.Vector3 | null = null;
-  private pointerDown: { x: number; y: number; id: number } | null = null;
+  private readonly placement = new PlacementGesture(CLICK_MAX_PX);
   private lastHover = 0;
   private lastTime = 0;
   private disposed = false;
@@ -317,7 +318,7 @@ export class SplatViewerEngine {
     this.orbit.screenSpacePanning = true;
     this.orbit.maxPolarAngle = Math.PI; // splats can be viewed from below when the scan is flipped
 
-    this.keys = new CameraKeyControls(this.camera, container);
+    this.keys = new CameraKeyControls(this.camera, container, this.renderer.domElement);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -327,6 +328,8 @@ export class SplatViewerEngine {
     this.listen(canvas, "pointerdown", this.onPointerDown);
     this.listen(canvas, "pointerup", this.onPointerUp);
     this.listen(canvas, "pointermove", this.onPointerMove);
+    this.listen(canvas, "pointercancel", this.onPointerCancel);
+    this.listen(canvas, "lostpointercapture", this.onPointerCancel);
     this.listen(canvas, "pointerleave", () => this.setHover(null));
     this.listen(canvas, "wheel", this.onWheel);
 
@@ -378,7 +381,9 @@ export class SplatViewerEngine {
 
   setTool(tool: ViewerTool) {
     this.tool = tool;
+    this.placement.reset();
     this.renderer.domElement.style.cursor = tool === "navigate" ? "" : "crosshair";
+    for (const l of this.labels) if (l.noteId) this.setPinInteraction(l.el);
     if (tool !== "measure") this.setPendingPoint(null);
     this.setHover(null);
   }
@@ -487,6 +492,9 @@ export class SplatViewerEngine {
     el.className = PIN_CLASS;
     el.dataset.kind = "note";
     el.title = title;
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", title);
+    this.setPinInteraction(el);
 
     const chip = document.createElement("span");
     chip.className = `${PIN_CHIP_CLASS} ${PIN_CHIP_IDLE}`;
@@ -512,6 +520,13 @@ export class SplatViewerEngine {
     el.addEventListener("pointerdown", (e) => e.stopPropagation());
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (this.tool !== "navigate") return;
+      this.opts.onEvent({ type: "pick-note", tool: this.tool, id });
+    });
+    el.addEventListener("keydown", (e) => {
+      if (this.tool !== "navigate" || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      e.stopPropagation();
       this.opts.onEvent({ type: "pick-note", tool: this.tool, id });
     });
     this.stylePin(el, id === this.selectedNoteId);
@@ -523,8 +538,18 @@ export class SplatViewerEngine {
     const chip = el.firstElementChild as HTMLSpanElement | null;
     const svg = el.lastElementChild as SVGElement | null;
     if (chip) chip.className = `${PIN_CHIP_CLASS} ${selected ? PIN_CHIP_SELECTED : PIN_CHIP_IDLE}`;
-    if (svg) svg.style.transform = selected ? "scale(1.2)" : "";
+    if (svg) {
+      svg.style.transformOrigin = "50% 100%"; // Keep the tip at the saved position when selected.
+      svg.style.transform = selected ? "scale(1.2)" : "";
+    }
+    el.setAttribute("aria-pressed", String(selected));
     el.style.zIndex = selected ? "2" : "1";
+  }
+
+  private setPinInteraction(el: HTMLDivElement) {
+    // Placement must reach the scan, including underneath an existing pin's label.
+    el.style.pointerEvents = this.tool === "navigate" ? "auto" : "none";
+    el.tabIndex = this.tool === "navigate" ? 0 : -1;
   }
 
   /** Replace the rendered measurements (world frame). */
@@ -545,12 +570,15 @@ export class SplatViewerEngine {
       const mid = a.clone().add(b).multiplyScalar(0.5);
       this.addLabel("measure", `${m.label ? `${m.label} · ` : ""}${formatMetres(a.distanceTo(b))}`, mid, 0.08);
     }
+    this.setPendingPoint(this.pendingPoint ? this.pendingPoint.toArray() as Vec3 : null);
   }
 
   /** First point of an in-progress measurement (world frame), or null to cancel. */
   setPendingPoint(point: Vec3 | null) {
     this.pendingPoint = point ? new THREE.Vector3(...point) : null;
     this.removeLabels("pending");
+    for (const child of [...this.measureGroup.children]) if (child.userData.pending) this.measureGroup.remove(child);
+    this.previewLine.visible = false;
     if (this.pendingPoint) {
       const s = new THREE.Mesh(this.sphereGeo, this.pendingMaterial);
       s.scale.setScalar(MEASURE_RADIUS);
@@ -558,9 +586,6 @@ export class SplatViewerEngine {
       s.renderOrder = 1003;
       s.userData.pending = true;
       this.measureGroup.add(s);
-    } else {
-      for (const child of [...this.measureGroup.children]) if (child.userData.pending) this.measureGroup.remove(child);
-      this.previewLine.visible = false;
     }
   }
 
@@ -802,24 +827,22 @@ export class SplatViewerEngine {
   private onPointerDown = (e: PointerEvent) => {
     // Any click on the scene should make the keyboard controls live.
     this.opts.container.focus({ preventScroll: true });
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    this.pointerDown = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    this.placement.start(e);
   };
 
   private onPointerUp = (e: PointerEvent) => {
-    const d = this.pointerDown;
-    this.pointerDown = null;
-    if (!d || d.id !== e.pointerId) return;
-    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_MAX_PX) return;
-    this.pick(e);
+    if (this.placement.finish(e)) this.pick(e);
+  };
+
+  private onPointerCancel = (e: PointerEvent) => {
+    this.placement.cancel(e);
+    this.setHover(null);
   };
 
   private onPointerMove = (e: PointerEvent) => {
-    const down = this.pointerDown;
     // A drag means "I'll take it from here"; a click (under CLICK_MAX_PX) still picks.
-    if (down && this.follow !== "off" && Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MAX_PX)
-      this.releaseFollow();
-    if (this.tool === "navigate" || this.pointerDown) return;
+    if (this.placement.move(e) && this.follow !== "off") this.releaseFollow();
+    if (this.tool === "navigate" || this.placement.pressed) return;
     const now = performance.now();
     if (now - this.lastHover < HOVER_THROTTLE_MS) return;
     this.lastHover = now;
@@ -831,9 +854,10 @@ export class SplatViewerEngine {
     this.setRayFromEvent(e);
 
     // Note pins are DOM elements and handle their own clicks; waypoints are picked here.
-    const node = this.pickNode(e);
-    if (node) return onEvent({ type: "pick-node", tool: this.tool, id: node });
-    if (this.tool === "navigate") return;
+    if (this.tool === "navigate") {
+      const node = this.pickNode(e);
+      return onEvent(node ? { type: "pick-node", tool: this.tool, id: node } : { type: "pick-miss", tool: this.tool });
+    }
 
     const hit = this.intersectScene();
     if (!hit) return onEvent({ type: "pick-miss", tool: this.tool });
@@ -864,7 +888,7 @@ export class SplatViewerEngine {
       v.copy(local);
       this.graphGroup.localToWorld(v);
       v.project(this.camera);
-      if (v.z > 1) continue; // behind the camera
+      if (v.z < -1 || v.z > 1) continue;
       const dx = rect.left + ((v.x + 1) / 2) * rect.width - e.clientX;
       const dy = rect.top + ((1 - v.y) / 2) * rect.height - e.clientY;
       const d2 = dx * dx + dy * dy;
@@ -879,6 +903,9 @@ export class SplatViewerEngine {
       ((e.clientX - rect.left) / rect.width) * 2 - 1,
       -((e.clientY - rect.top) / rect.height) * 2 + 1,
     );
+    this.camera.updateMatrixWorld(true);
+    this.raycaster.near = this.camera.near;
+    this.raycaster.far = this.camera.far;
     this.raycaster.setFromCamera(ndc, this.camera);
   }
 
@@ -913,6 +940,7 @@ export class SplatViewerEngine {
 
   private intersectSplat(): THREE.Intersection | null {
     if (!this.mesh?.isInitialized) return null;
+    this.mesh.updateWorldMatrix(true, false);
     const hits: THREE.Intersection[] = [];
     this.mesh.raycast(this.raycaster, hits);
     hits.sort((a, b) => a.distance - b.distance);
@@ -951,6 +979,7 @@ export class SplatViewerEngine {
     mesh.initialized
       .then((m) => {
         if (this.disposed) return;
+        this.applyLayer();
         this.localBounds = robustBounds(m);
         // Following owns the camera: take the scan's scale, but don't yank the view off the phone.
         if (this.follow === "off") this.resetView();
@@ -1024,7 +1053,7 @@ export class SplatViewerEngine {
    * canvas; a world with no splat falls back to the mesh for the same reason.
    */
   private applyLayer() {
-    const mesh = this.collision !== null && (this.layer === "mesh" || !this.mesh);
+    const mesh = this.collision !== null && (this.layer === "mesh" || !this.mesh?.isInitialized);
     this.meshGroup.visible = mesh;
     if (this.mesh) this.mesh.visible = !mesh;
   }
@@ -1148,9 +1177,10 @@ export class SplatViewerEngine {
       this.mesh.updateMatrixWorld(true);
       return this.localBounds.clone().applyMatrix4(this.mesh.matrixWorld);
     }
-    if (this.localBounds && this.collision) {
-      this.meshGroup.updateMatrixWorld(true);
-      return this.localBounds.clone().applyMatrix4(this.meshGroup.matrixWorld);
+    if (this.collision) {
+      this.collision.updateWorldMatrix(true, true);
+      // setFromObject already returns world coordinates; don't apply alignment twice.
+      return new THREE.Box3().setFromObject(this.collision);
     }
     const points = [...this.nodePositions.values()];
     if (points.length) {

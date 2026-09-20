@@ -19,6 +19,9 @@ final class LocalizationReporter: ObservableObject {
     @Published private(set) var lastProgress: ProgressUpdate?
     /// Called on the main actor with every `speak` phrase the backend returns.
     var onSpeak: ((String) -> Void)?
+    /// Called on the main actor with every progress update, spoken or not, so route cues can
+    /// follow the live heading rather than only the phrases the backend chose to say.
+    var onProgress: ((ProgressUpdate) -> Void)?
     /// Image queries mirrored to `POST /worlds/{id}/localize/query`.
     @Published private(set) var queriesSent = 0
     @Published private(set) var queriesFailed = 0
@@ -35,6 +38,8 @@ final class LocalizationReporter: ObservableObject {
     private var lastFixSend: TimeInterval = 0
     private var lastPoseSend: TimeInterval = 0
     private var inFlight = false
+    /// In-flight `POST /sessions`, shared by everyone who needs the id before it exists.
+    private var creating: Task<String, Error>?
     /// The chosen destination has been accepted for the current session.
     private var destinationApplied = false
     private var destinationInFlight = false
@@ -122,18 +127,28 @@ final class LocalizationReporter: ObservableObject {
 
     /// The session id, creating a session up front when no VPS fix has produced one yet. A voice
     /// call needs it before the wearer is localized; `/localize` later joins the same session.
+    ///
+    /// One phone, one session: concurrent callers (the voice call starting while the first fix
+    /// lands) share a single creation. Two sessions would leave the call bound to one that never
+    /// receives a pose, and the guide would insist the wearer is not localized.
     func ensureSession() async throws -> String {
         if let sessionId { return sessionId }
+        if let creating { return try await creating.value }
         guard let client else { throw WanderBackendClient.HTTPError(status: 0, body: "Backend is not configured") }
-        if worldId == nil { await resolveWorld() }
-        guard let worldId else { throw WanderBackendClient.HTTPError(status: 0, body: lastError ?? "No world configured") }
-        let created = try await client.createSession(worldId: worldId, deviceId: deviceId)
-        if sessionId == nil {
-            sessionId = created
-            destinationApplied = false
-            applyDestination()
+        let task = Task<String, Error> {
+            if worldId == nil { await resolveWorld() }
+            guard let worldId else { throw WanderBackendClient.HTTPError(status: 0, body: lastError ?? "No world configured") }
+            let created = try await client.createSession(worldId: worldId, deviceId: deviceId)
+            if sessionId == nil {
+                sessionId = created
+                destinationApplied = false
+                applyDestination()
+            }
+            return sessionId ?? created
         }
-        return sessionId ?? created
+        creating = task
+        defer { if creating == task { creating = nil } }
+        return try await task.value
     }
 
     private func applyDestination() {
@@ -172,21 +187,26 @@ final class LocalizationReporter: ObservableObject {
 
     /// A VPS fix from the SDK. Sent through /localize.
     func report(fix: LocalizationFix) {
-        guard let client, let worldId else { return }
+        guard let client, worldId != nil else { return }
         let now = Date().timeIntervalSince1970
         guard now - lastFixSend >= minInterval, !inFlight else { return }
         lastFixSend = now
         inFlight = true
-        let dictionary = WanderBackendClient.localizationBody(
-            deviceId: deviceId, role: role, siteId: siteId, pose: fix.pose,
-            confidence: fix.confidence, state: fix.state, timestamp: fix.timestamp, sessionId: sessionId)
-        guard let body = try? JSONSerialization.data(withJSONObject: dictionary) else { return }
         Task {
             defer { inFlight = false }
             do {
+                // Join the phone's one session rather than letting /localize open another; see ensureSession.
+                let sessionId = try await ensureSession()
+                guard let worldId else { return }
+                // Stamped when sent, not with the SDK's capture time: the backend orders poses by
+                // timestamp and the ARKit poses posted since the fix was captured carry the wall clock.
+                let dictionary = WanderBackendClient.localizationBody(
+                    deviceId: deviceId, role: role, siteId: siteId, pose: fix.pose,
+                    confidence: fix.confidence, state: fix.state, timestamp: Date(), sessionId: sessionId)
+                let body = try JSONSerialization.data(withJSONObject: dictionary)
                 let response = try await client.localize(worldId: worldId, body: body)
-                if sessionId != response.sessionId {
-                    sessionId = response.sessionId
+                if self.sessionId != response.sessionId {
+                    self.sessionId = response.sessionId
                     destinationApplied = false
                 }
                 lastResponse = response
@@ -217,6 +237,7 @@ final class LocalizationReporter: ObservableObject {
                 posesSent += 1
                 lastProgress = progress
                 lastError = nil
+                onProgress?(progress)
                 if let phrase = progress.speak { onSpeak?(phrase) }
             } catch {
                 lastError = error.localizedDescription
@@ -293,6 +314,8 @@ final class LocalizationReporter: ObservableObject {
     }
 
     func reset() {
+        creating?.cancel()
+        creating = nil
         sessionId = nil
         destinationApplied = false
         lastProgress = nil

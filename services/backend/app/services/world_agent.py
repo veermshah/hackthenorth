@@ -36,9 +36,12 @@ class WorldAgentTools:
         if 'lastPose' in data:
             point = data['lastPose']['position']
             facing = yaw(data['lastPose']['rotation'])
+            # Session.snapshot() ages the pose out against the server clock, so give it the time the
+            # server accepted the pose rather than the phone's own stamp.
             session.pose = Pose(x=point[0], y=point[1], z=point[2],
                 heading=legacy_heading(facing) if facing is not None else 0,
-                localized=data['state'] not in ('lost', 'ended'), timestamp=meta.get('timestamp', 0),
+                localized=data['state'] not in ('lost', 'ended'),
+                timestamp=meta.get('receivedAt', meta.get('timestamp', 0)),
                 localization=Localization(provider='niantic', coordinate_frame='world',
                     provider_metadata={'heading_convention': 'legacy contract 0=+Z, converted from world heading 0=-Z',
                                        'world_heading_deg': facing}))
@@ -50,7 +53,7 @@ class WorldAgentTools:
         data = self.worlds.session(session_id)
         world = self.worlds.world(data['worldId'])
         places = list(self.navigation.targets(world).values())
-        localized = data.get('lastPose') is not None and data['state'] not in ('lost', 'ended')
+        localized = self.navigation.localized(session_id, data)
         position = data['lastPose']['position'] if localized else None
         if position is not None:
             places.sort(key=lambda p: horizontal(position, p['position']))
@@ -74,11 +77,11 @@ class WorldAgentTools:
         rows.sort(key=lambda row: row['distance_m'])
         return rows
 
-    def with_route_distance(self, data, world, candidates):
+    def with_route_distance(self, data, world, candidates, localized):
         """Attach the deterministic route length to each candidate when the traveller is localized."""
         for row in candidates:
             row['route_distance_m'] = None
-            if data.get('lastPose') is None or data['state'] in ('lost', 'ended'):
+            if not localized:
                 continue
             try:
                 route = self.navigation.route(world, self.navigation.route_request(data, data['lastPose'], row['id']))
@@ -98,12 +101,17 @@ class WorldAgentTools:
         nodes = {n['id']: n for n in world_graph(world)['nodes']}
         places = self.navigation.targets(world)
         sources, actions = [], []
-        localized = session.snapshot()['localization']['localized']
+        localized = self.navigation.localized(session.session_id, data)
         position = data['lastPose']['position'] if localized else None
         if name == 'get_current_location':
             nearest = min(nodes.values(), key=lambda n: horizontal(n['position'], position)) if localized and nodes else None
             result = {'pose': data.get('lastPose') if localized else None, 'localized': localized,
-                      'frame': 'world', 'nearestNode': nearest, 'nearby_landmarks': [], 'nearby_notes': []}
+                      'tracking': data['state'], 'frame': 'world', 'nearestNode': nearest,
+                      'nearby_landmarks': [], 'nearby_notes': []}
+            if not localized:
+                # Tell the model *why* there is no position so it can say something useful.
+                result['reason'] = ('tracking lost' if data['state'] == 'lost' else
+                                    'no pose received yet' if data.get('lastPose') is None else 'last pose is stale')
             if localized:
                 # Human-reviewed annotations only, described relative to the traveller's heading so the
                 # assistant never has to convert image-relative or map-relative directions itself.
@@ -132,7 +140,7 @@ class WorldAgentTools:
                 text = places[row['id']].get('text')
                 if text:
                     row['text'] = text
-            result = {'evidence_class': 'local_catalogue', 'candidates': self.with_route_distance(data, world, candidates)}
+            result = {'evidence_class': 'local_catalogue', 'candidates': self.with_route_distance(data, world, candidates, localized)}
             sources.extend({'type': 'map_entity', 'id': row['id']} for row in candidates)
         elif name == 'search_places':
             near = {'x': position[0], 'y': position[1], 'z': position[2]} if localized else None
@@ -142,7 +150,7 @@ class WorldAgentTools:
                 # No search service: the same by-name matching resolve_destination uses.
                 hits = None
             if hits is None:
-                result = self.with_route_distance(data, world, resolve(places.values(), args.query, position))
+                result = self.with_route_distance(data, world, resolve(places.values(), args.query, position), localized)
                 for row in result:
                     row['evidence_class'] = 'local_catalogue'
             else:
@@ -155,7 +163,7 @@ class WorldAgentTools:
                     record['description'] = hit.get('description', '')
                     record['tags'] = hit.get('tags', [])
                     result.append(record)
-                self.with_route_distance(data, world, result)
+                self.with_route_distance(data, world, result, localized)
             sources.extend({'type': 'map_entity', 'id': row['id']} for row in result)
         elif name == 'set_destination':
             if not localized:

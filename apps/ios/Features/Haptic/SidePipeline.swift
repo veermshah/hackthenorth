@@ -12,6 +12,9 @@ final class SidePipeline: ObservableObject {
     @Published private(set) var reportsSent = 0
     /// One-off buzzes relayed from the backend's public /haptics endpoints.
     @Published private(set) var pulsesReceived = 0
+    /// Directional route taps from the front phone: turn this way, or you have arrived.
+    @Published private(set) var routeCuesReceived = 0
+    @Published private(set) var lastRouteCue: RouteCue?
     /// What the structure estimator saw on the last frame (non-LiDAR phones).
     @Published private(set) var structureStats = StructureObstacleEstimator.Stats()
     private var wantsSensing = false
@@ -69,7 +72,7 @@ final class SidePipeline: ObservableObject {
                 guard let self else { break }
                 let z = self.zones
                 let fmt: (Float?) -> String = { $0.map { String(format: "%.2f", $0) } ?? "-" }
-                print("[side \(self.role.rawValue)] ar=\(self.arSession.state) frames=\(self.arSession.frameCount) depth=\(self.arSession.depthAvailable) L=\(fmt(z.left)) C=\(fmt(z.center)) R=\(fmt(z.right)) touching=\(z.touching) pulses=\(self.pulsesReceived) pts=\(self.estimator.stats.rawPoints)/\(self.estimator.stats.inFan) planes=\(self.estimator.stats.planes) tilted=\(self.estimator.stats.tilted) link=\(self.link.connectedRoles.map(\.rawValue)) sent=\(self.link.messagesSent) recv=\(self.link.messagesReceived) cmd=\(self.lastCommand.shouldBuzz(self.role) ? "buzz" : "quiet") err=\(self.link.lastError ?? "-")")
+                print("[side \(self.role.rawValue)] ar=\(self.arSession.state) frames=\(self.arSession.frameCount) depth=\(self.arSession.depthAvailable) L=\(fmt(z.left)) C=\(fmt(z.center)) R=\(fmt(z.right)) touching=\(z.touching) pulses=\(self.pulsesReceived) routeCues=\(self.routeCuesReceived) pts=\(self.estimator.stats.rawPoints)/\(self.estimator.stats.inFan) planes=\(self.estimator.stats.planes) tilted=\(self.estimator.stats.tilted) link=\(self.link.connectedRoles.map(\.rawValue)) sent=\(self.link.messagesSent) recv=\(self.link.messagesReceived) cmd=\(self.lastCommand.shouldBuzz(self.role) ? "buzz" : "quiet") err=\(self.link.lastError ?? "-")")
             }
         }
     }
@@ -103,6 +106,7 @@ final class SidePipeline: ObservableObject {
         link.stop()
         arSession.stop()
         haptics.stopPulsing()
+        haptics.stopTapping()
         wantsSensing = false
         statusTask?.cancel()
         pollTask?.cancel()
@@ -124,6 +128,15 @@ final class SidePipeline: ObservableObject {
     }
 
     private func handle(_ message: PeerMessage) {
+        if case .route(let cue) = message {
+            guard cue.role == role else { return }
+            routeCuesReceived += 1
+            lastRouteCue = cue
+            print("[route] \(cue.kind.rawValue) received at \(cue.atNode)")
+            // Dropped by the controller while this mount is warning about an obstacle.
+            haptics.tap(times: cue.kind.taps)
+            return
+        }
         if case .pulse(let pulse) = message {
             guard pulse.role == role else { return }
             pulsesReceived += 1

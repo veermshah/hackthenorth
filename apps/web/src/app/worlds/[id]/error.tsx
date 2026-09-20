@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
 
-/** Shown when the worlds backend can't be reached while opening a world. */
+/** Failed reads must never open an empty editor that could overwrite saved work. */
 export default function WorldError({ reset }: { reset: () => void }) {
   return (
     <main className="flex flex-1 items-center justify-center p-6">
@@ -11,11 +11,9 @@ export default function WorldError({ reset }: { reset: () => void }) {
         <span className="mx-auto inline-flex size-11 items-center justify-center rounded-full border-2 border-wander-pink bg-pure-white text-wander-pink">
           <Icon name="x" size={18} />
         </span>
-        <p className="mt-4 text-body font-medium text-void-black">Worlds backend unavailable</p>
+        <p className="mt-4 text-body font-medium text-void-black">Could not load this world</p>
         <p className="mt-1 text-body-sm text-graphite">
-          The FastAPI service that fronts the Modal Volume didn&apos;t answer or rejected the key. Check{" "}
-          <code>WANDER_API_URL</code> and <code>WANDER_API_KEY</code>, or unset the URL to read from{" "}
-          <code>maps/assets</code>.
+          The scan, pins or measurements could not be read. Try again to load your saved work before editing.
         </p>
         <div className="mt-4 flex justify-center gap-2">
           <button type="button" className="btn-ghost" onClick={reset}>

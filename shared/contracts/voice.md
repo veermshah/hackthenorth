@@ -55,6 +55,12 @@ session; a second connection is closed with 1008.
   requested verbatim with `instructions.append` (which may interrupt speech). Duplicates within 3 s collapse.
 - Situation: every `VOICE_CONTEXT_INTERVAL_S` (when changed) a one-paragraph `thinking` update with the
   nearest stop, notes within 10 m with side, and guidance state.
+- Localized means one thing everywhere (`worlds.has_fix`): the session has a `lastPose`, its state is not
+  `lost`/`ended`, and the server accepted a pose within `POSE_MAX_AGE_S` (15 s, server clock). The agent's
+  tools, its application context and the situation paragraph all use it, so the voice never tells a
+  localized wearer otherwise. The phone therefore keeps `POST /sessions/{id}/pose` flowing at a few Hz
+  whenever it has a usable anchor, and holds the last tracked anchor across the SDK's `notTracked` gaps
+  (`LocalizationReportPolicy`) instead of reporting each gap as `lost`.
 - Lifecycle: proactive renewal 60 s before Live `expires_at` and after `expired`/`connection_lost`,
   with buffered microphone audio flushed into the new session; `VOICE_MAX_MINUTES` caps a call.
 

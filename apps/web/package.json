@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --import ./tests/register.mjs --test tests/*.test.mjs",
     "image-prompts": "node --experimental-strip-types scripts/image-prompts.mts",
     "world:add": "node --experimental-strip-types scripts/add-world.mts"
   },

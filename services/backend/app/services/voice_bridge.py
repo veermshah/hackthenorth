@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from websockets.asyncio.client import connect as websocket_connect
 
 from ..routing.heading import bearing, horizontal, relative, yaw
-from .worlds import targets, world_graph, world_notes
+from .worlds import has_fix, targets, world_graph, world_notes
 
 logger = logging.getLogger(__name__)
 LIVE_URL = 'wss://api.openai.com/v1/live/sessions'
@@ -213,8 +213,11 @@ def situation(worlds, session_id):
     nodes = {n['id']: n for n in world_graph(world)['nodes']}
     parts = []
     pose = data.get('lastPose')
-    if pose is None or data['state'] in ('lost', 'ended'):
-        parts.append('Position unknown: no current localization fix.')
+    if not has_fix(worlds, session_id, data):
+        # Same test the agent's tools apply, so the voice and the backend never disagree about it.
+        why = 'tracking is lost' if data['state'] == 'lost' else 'the phone has not localized yet' if pose is None \
+            else 'the phone stopped sending poses'
+        parts.append(f'Position unknown right now ({why}); if asked, delegate to the backend for the latest fix.')
     else:
         position, facing = pose['position'], yaw(pose['rotation'])
         if nodes:

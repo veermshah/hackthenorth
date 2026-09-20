@@ -1,7 +1,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -276,13 +276,14 @@ export async function getMeasurements(id: string): Promise<Measurement[]> {
     });
     if (res.status === 404) return [];
     if (!res.ok) throw await apiError(res);
-    return parseMeasurements(((await res.json()) as MeasurementsFile).measurements ?? []);
+    return parseMeasurements(((await res.json()) as MeasurementsFile).measurements);
   }
   try {
     const raw = await readFile(join(ASSETS_DIR, "worlds", id, "measurements.json"), "utf8");
-    return parseMeasurements((JSON.parse(raw) as MeasurementsFile).measurements ?? []);
-  } catch {
-    return [];
+    return parseMeasurements((JSON.parse(raw) as MeasurementsFile).measurements);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
 }
 
@@ -308,7 +309,7 @@ export async function saveMeasurements(id: string, measurements: Measurement[]):
   const dir = join(ASSETS_DIR, "worlds", id);
   if (!(await readLocalManifest(id))) return null;
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "measurements.json"), `${JSON.stringify(file, null, 2)}\n`);
+  await writeEditorFile(dir, "measurements.json", file);
   return file;
 }
 
@@ -321,13 +322,14 @@ export async function getNotes(id: string): Promise<WorldNote[]> {
     });
     if (res.status === 404) return [];
     if (!res.ok) throw await apiError(res);
-    return parseNotes(((await res.json()) as NotesFile).notes ?? []);
+    return parseNotes(((await res.json()) as NotesFile).notes);
   }
   try {
     const raw = await readFile(join(ASSETS_DIR, "worlds", id, "notes.json"), "utf8");
-    return parseNotes((JSON.parse(raw) as NotesFile).notes ?? []);
-  } catch {
-    return [];
+    return parseNotes((JSON.parse(raw) as NotesFile).notes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
 }
 
@@ -383,8 +385,19 @@ export async function saveNotes(id: string, notes: WorldNote[]): Promise<NotesFi
   const dir = join(ASSETS_DIR, "worlds", id);
   if (!(await readLocalManifest(id))) return null;
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "notes.json"), `${JSON.stringify(file, null, 2)}\n`);
+  await writeEditorFile(dir, "notes.json", file);
   return file;
+}
+
+/** Readers see either complete snapshot, even during a save or interrupted write. */
+async function writeEditorFile(dir: string, name: string, file: NotesFile | MeasurementsFile) {
+  const temporary = join(dir, `.${name}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`);
+    await rename(temporary, join(dir, name));
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 /* ------------------------------------------------------------ localizations */

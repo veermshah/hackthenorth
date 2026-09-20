@@ -40,8 +40,8 @@ export default async function WorldPage({ params }: PageProps<"/worlds/[id]">) {
   if (!world) notFound();
   const [notes, measurements, localizations] = world.manifest
     ? await Promise.all([
-        getNotes(id).catch(() => []),
-        getMeasurements(id).catch(() => []),
+        getNotes(id),
+        getMeasurements(id),
         getLocalizations(id, 30).catch(() => []),
       ])
     : [[], [], []];
@@ -49,6 +49,7 @@ export default async function WorldPage({ params }: PageProps<"/worlds/[id]">) {
   return (
     <main className="flex flex-1 flex-col">
       <WorldViewer
+        key={id}
         worldId={id}
         name={world.name}
         status={world.status}

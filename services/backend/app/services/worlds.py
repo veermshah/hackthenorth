@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +27,32 @@ SCHEMAS = {name: json.loads((ROOT / 'shared/contracts' / name).read_text(encodin
                         'notes.schema.json')}
 REGISTRY = Registry().with_resources([(BASE + name, Resource.from_contents(schema))
                                       for name, schema in SCHEMAS.items()])
+# A pose the phone stopped refreshing this long ago (server clock) no longer says where the traveller is.
+POSE_MAX_AGE_S = 15
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def session_metadata(store, session_id):
+    """Per-session progress bookkeeping (`<id>-state.json`); empty for a session without poses yet."""
+    try:
+        return store.read('sessions', session_id + '-state.json')
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+        return {}
+
+
+def has_fix(store, session_id, data, max_age_s=POSE_MAX_AGE_S):
+    """The one definition of "localized" every consumer of a session shares: a pose reported while
+    tracking, still being refreshed. Age is measured from when the server accepted the pose, so a phone
+    with a skewed clock cannot make a live stream look stale (or a stale one look live)."""
+    if data.get('lastPose') is None or data['state'] in ('lost', 'ended'):
+        return False
+    received = session_metadata(store, session_id).get('receivedAt')
+    return received is not None and time.time() - received <= max_age_s
 
 
 def check(value, schema, pointer=''):
@@ -54,6 +77,11 @@ def check(value, schema, pointer=''):
             for child in item:
                 finite(child)
     finite(value)
+    if not pointer and schema in ('notes.schema.json', 'measurements.schema.json'):
+        field = 'notes' if schema == 'notes.schema.json' else 'measurements'
+        ids = [item['id'] for item in value[field]]
+        if len(ids) != len(set(ids)):
+            raise HTTPException(400, f'Duplicate {field} IDs are not allowed')
     return value
 
 
@@ -493,12 +521,10 @@ class WorldNavigation:
         return targets(self.store, world)
 
     def metadata(self, session_id):
-        try:
-            return self.store.read('sessions', session_id + '-state.json')
-        except HTTPException as error:
-            if error.status_code != 404:
-                raise
-            return {}
+        return session_metadata(self.store, session_id)
+
+    def localized(self, session_id, data):
+        return has_fix(self.store, session_id, data)
 
     async def create(self, world_id, device_id, destination=None, accessible_only=False):
         world = self.store.world(world_id)
@@ -635,7 +661,7 @@ class WorldNavigation:
             meta = self.metadata(session_id)
             if timestamp <= meta.get('timestamp', 0):
                 raise HTTPException(400, 'Out-of-order pose')
-            meta['timestamp'] = timestamp
+            meta['timestamp'], meta['receivedAt'] = timestamp, time.time()
             session['lastPose'], session['updatedAt'] = body['pose'], now()
             world = self.store.world(session['worldId'])
             rerouted = False
@@ -644,7 +670,8 @@ class WorldNavigation:
                 session['state'] = 'lost'
                 progress = {'state': 'lost', 'remainingMetres': 0}
                 if not was_lost:
-                    progress['speak'] = 'Tracking lost. Navigation paused.'
+                    # Only a guided traveller has navigation to pause.
+                    progress['speak'] = 'Tracking lost. Navigation paused.' if 'destination' in session else 'Tracking lost.'
                 meta['off_since'] = None
             elif 'destination' not in session:
                 session['state'] = 'localizing'
