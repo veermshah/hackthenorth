@@ -25,6 +25,13 @@ struct LocalizationReportPolicy {
     /// How long a tracked anchor is trusted after the SDK stops confirming it.
     var maxAge: TimeInterval = 10
 
+    /// How confident a fix must be before poses are held against its anchor. The map haptics
+    /// refuse a weaker fix already (`FrontPipeline.mapMinConfidence`), and a feature-poor room
+    /// answers with weak, badly placed fixes: without the same gate here, one of them becomes the
+    /// anchor every pose is measured from for a whole `maxAge` -- and restarts that hold -- while
+    /// the haptics go on using the good anchor. A weak fix is still reported; it is just never held.
+    var minConfidence: Float = 0.3
+
     private(set) var held: (fix: LocalizationFix, at: Date)?
     private var lastReported: LocalizationFix?
 
@@ -32,7 +39,7 @@ struct LocalizationReportPolicy {
     var reporting: LocalizationFix? { held?.fix }
 
     mutating func decide(_ fix: LocalizationFix, now: Date = Date()) -> Action {
-        if fix.state == .localized {
+        if fix.state == .localized, fix.confidence >= minConfidence {
             held = (fix, now)
         } else if let current = held {
             if now.timeIntervalSince(current.at) <= maxAge {

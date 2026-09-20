@@ -54,7 +54,8 @@ final class FrontPipeline: ObservableObject {
     var mapMaxFixAge: TimeInterval = 10
     private var lastGoodFix: (fix: LocalizationFix, at: Date)?
     /// What the backend hears about each fix; holds the last tracked anchor across VPS gaps for
-    /// the same `mapMaxFixAge` so the voice guide's view of localization matches the haptics'.
+    /// the same `mapMaxFixAge`, and only an anchor as confident as `mapMinConfidence`, so the voice
+    /// guide's view of localization matches the haptics'.
     private var reportPolicy = LocalizationReportPolicy()
     private var staticMap: StaticMap?
     private var mapWorldId: String?
@@ -474,6 +475,7 @@ final class FrontPipeline: ObservableObject {
     /// Feed the backend from this frame's fix; see `LocalizationReportPolicy` for the hold across VPS gaps.
     private func report(fix: LocalizationFix, cameraTransform: simd_float4x4) {
         reportPolicy.maxAge = mapMaxFixAge
+        reportPolicy.minConfidence = mapMinConfidence
         switch reportPolicy.decide(fix) {
         case .fix(let changed): reporter.report(fix: changed)
         case .pose(let anchor): reporter.report(cameraTransform: cameraTransform, using: anchor)
