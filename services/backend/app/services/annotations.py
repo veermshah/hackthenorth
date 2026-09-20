@@ -334,20 +334,23 @@ def candidates_to_notes(candidates: list[Candidate], existing_notes: list[dict],
     and skipped counts candidates within radius_metres of an existing note (by title, so
     re-running detection doesn't keep re-adding the same object)."""
     positions = [n['position'] for n in existing_notes]
+    known_ids = {n.get('id') for n in existing_notes}
     pairs, skipped = [], 0
     for candidate in candidates:
         if candidate.position is None:
             continue
-        if any(math.dist(candidate.position, p) <= radius_metres for p in positions):
+        identifier = 'auto-' + candidate.id
+        if identifier in known_ids or any(math.dist(candidate.position, p) <= radius_metres for p in positions):
             skipped += 1
             continue
-        note = {'id': 'auto-' + candidate.id, 'title': candidate.name,
+        note = {'id': identifier, 'title': candidate.name,
                 'position': list(candidate.position), 'author': 'auto-detected', 'createdAt': now()}
         if candidate.visual_location:
             note['location'] = candidate.visual_location
         if candidate.description:
             note['description'] = candidate.description
         pairs.append((note, candidate))
+        known_ids.add(identifier)
         positions.append(candidate.position)
     return pairs, skipped
 

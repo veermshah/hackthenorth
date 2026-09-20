@@ -216,10 +216,9 @@ async def validate_against_mesh(world_id: str, request: Request):
 @router.get('/worlds/{world_id}/measurements')
 async def measurements(world_id: str, request: Request):
     store = request.app.state.worlds
-    store.world(world_id)
-    if not store.path('worlds', world_id, 'measurements.json').exists():
-        return {'schema': 'wander.measurements/v1', 'worldId': world_id, 'measurements': []}
-    return check(store.read('worlds', world_id, 'measurements.json'), 'measurements.schema.json')
+    async with store.lock('world:' + world_id):
+        store.world(world_id)
+        return await store.read_editor_file(world_id, 'measurements')
 
 
 @router.put('/worlds/{world_id}/measurements')
@@ -238,10 +237,9 @@ async def put_measurements(world_id: str, request: Request):
 @router.get('/worlds/{world_id}/notes')
 async def notes(world_id: str, request: Request):
     store = request.app.state.worlds
-    store.world(world_id)
-    if not store.path('worlds', world_id, 'notes.json').exists():
-        return {'schema': 'wander.notes/v1', 'worldId': world_id, 'notes': []}
-    return check(store.read('worlds', world_id, 'notes.json'), 'notes.schema.json')
+    async with store.lock('world:' + world_id):
+        store.world(world_id)
+        return await store.read_editor_file(world_id, 'notes')
 
 
 @router.put('/worlds/{world_id}/notes')
@@ -303,9 +301,7 @@ async def auto_detect_notes(world_id: str, request: Request):
         raise HTTPException(422, str(error))
     async with store.lock('world:' + world_id):
         store.world(world_id)
-        current = check(store.read('worlds', world_id, 'notes.json'), 'notes.schema.json') \
-            if store.path('worlds', world_id, 'notes.json').exists() \
-            else {'schema': 'wander.notes/v1', 'worldId': world_id, 'notes': []}
+        current = await store.read_editor_file(world_id, 'notes')
         pairs, skipped = candidates_to_notes(batch.candidates, current['notes'])
         added = [note for note, _ in pairs]
         current = check({**current, 'notes': current['notes'] + added, 'updatedAt': now()}, 'notes.schema.json')

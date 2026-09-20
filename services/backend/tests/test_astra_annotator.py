@@ -194,3 +194,16 @@ def test_hand_written_candidates_without_a_placement_still_publish_at_the_waypoi
     assert result.status_code == 200, result.text
     node = {n['id']: n for n in result.json()['navigationGraph']['nodes']}['water']
     assert node['position'] == [4.5, 0, -1.2]
+
+
+def test_repeat_detection_never_reuses_an_id_after_a_pin_moves():
+    from ..app.services.annotations import Candidate, candidates_to_notes
+    candidate = Candidate(id='same', frame='a.jpg', frame_sha256='abc', category='bottle_filler',
+                          name='Water', description='', sign_text='', designation='unknown', uncertainty='',
+                          position=[0, 0, 0])
+    existing = [{'id': 'auto-same', 'position': [10, 0, 0]}]
+    pairs, skipped = candidates_to_notes([candidate], existing)
+    assert pairs == [] and skipped == 1
+    moved = candidate.model_copy(update={'position': [10, 0, 0]})
+    pairs, skipped = candidates_to_notes([candidate, moved], [])
+    assert len(pairs) == 1 and skipped == 1

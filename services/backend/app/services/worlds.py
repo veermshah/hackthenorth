@@ -91,6 +91,35 @@ def segment(value):
     return value
 
 
+def repair_editor_ids(data, resource):
+    """Keep every legacy record; only later occurrences of an ID get a new ID.
+
+    Reserve all original IDs first so a repaired ID cannot steal another record's
+    existing reference. Malformed records remain untouched for check() to reject.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get(resource), list):
+        return data
+    records = data[resource]
+    reserved = {record['id'] for record in records
+                if isinstance(record, dict) and isinstance(record.get('id'), str)}
+    seen, repaired = set(), []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get('id'), str):
+            repaired.append(record)
+            continue
+        identifier = record['id']
+        if identifier in seen:
+            suffix = 2
+            while f'{identifier}-duplicate-{suffix}' in reserved:
+                suffix += 1
+            identifier = f'{identifier}-duplicate-{suffix}'
+            reserved.add(identifier)
+            record = {**record, 'id': identifier}
+        seen.add(identifier)
+        repaired.append(record)
+    return {**data, resource: repaired}
+
+
 def note_search_document(note: dict, metadata: dict | None = None) -> dict:
     """Shape a WorldNote (hand-placed or auto-detected) for Ingestion.context_notes, so
     every pin in the viewer -- not just Astra-reviewed annotations -- is searchable by
@@ -442,6 +471,24 @@ class WorldStore:
             return json.loads(path.read_text(encoding='utf-8'))
         except FileNotFoundError:
             raise HTTPException(404, 'Not found')
+
+    async def read_editor_file(self, world_id, resource):
+        """Read saved pins/measurements and migrate old duplicate IDs under the caller's world lock."""
+        if resource not in ('notes', 'measurements'):
+            raise ValueError('Unknown editor resource')
+        filename = resource + '.json'
+        if not self.path('worlds', world_id, filename).exists():
+            return {'schema': f'wander.{resource}/v1', 'worldId': world_id, resource: []}
+        original = self.read('worlds', world_id, filename)
+        repaired = check(repair_editor_ids(original, resource), resource + '.schema.json')
+        if repaired['worldId'] != world_id:
+            raise HTTPException(400, 'Editor file worldId mismatch')
+        if repaired != original:
+            await self.write(original, 'worlds', world_id, f'{resource}-before-id-repair-{uuid4().hex}.json')
+            repaired['updatedAt'] = now()
+            await self.write(repaired, 'worlds', world_id, filename)
+            logger.warning('Repaired duplicate %s IDs for world %s; original file backed up', resource, world_id)
+        return repaired
 
     async def write(self, value, *parts):
         path = self.path(*parts)
