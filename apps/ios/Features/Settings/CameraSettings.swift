@@ -16,6 +16,9 @@ struct CameraSettings: Codable, Equatable, Sendable {
     var sideBuzzRangeMeters: Double = 0.6
     /// Spoken cues (route notes, readiness). Off: the app is haptics only.
     var voiceCuesEnabled: Bool = false
+    /// Draw the pinned notes' labels over the camera preview. Off by default: the wearer does not
+    /// look at the screen, and the labels clutter the feed for anyone checking the camera.
+    var showNoteLabels: Bool = false
     /// Left and right phones run LiDAR and report clearance to the front phone.
     /// Kept for stored-settings compatibility; side phones no longer sense. Their
     /// buzzes come from the front phone's localisation against the world map.
@@ -64,6 +67,7 @@ struct CameraSettings: Codable, Equatable, Sendable {
         obstacleRangeMeters = try c.decodeIfPresent(Double.self, forKey: .obstacleRangeMeters) ?? d.obstacleRangeMeters
         sideBuzzRangeMeters = try c.decodeIfPresent(Double.self, forKey: .sideBuzzRangeMeters) ?? d.sideBuzzRangeMeters
         voiceCuesEnabled = try c.decodeIfPresent(Bool.self, forKey: .voiceCuesEnabled) ?? d.voiceCuesEnabled
+        showNoteLabels = try c.decodeIfPresent(Bool.self, forKey: .showNoteLabels) ?? d.showNoteLabels
         sidePhonesSenseObstacles = try c.decodeIfPresent(Bool.self, forKey: .sidePhonesSenseObstacles) ?? d.sidePhonesSenseObstacles
         captureIntervalMs = try c.decodeIfPresent(Int.self, forKey: .captureIntervalMs) ?? d.captureIntervalMs
         jpegQuality = try c.decodeIfPresent(Double.self, forKey: .jpegQuality) ?? d.jpegQuality

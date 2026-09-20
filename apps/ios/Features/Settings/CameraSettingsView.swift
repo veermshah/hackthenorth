@@ -141,6 +141,8 @@ struct CameraSettingsView: View {
                 Section {
                     Toggle("Voice cues", isOn: $settingsStore.settings.voiceCuesEnabled)
                         .accessibilityIdentifier("settings.voiceCues")
+                    Toggle("Note labels on camera", isOn: $settingsStore.settings.showNoteLabels)
+                        .accessibilityIdentifier("settings.noteLabels")
                     Toggle("Upload query images", isOn: $settingsStore.settings.uploadQueryImages)
                         .accessibilityIdentifier("settings.uploadQueries")
                     Toggle("Include failed queries", isOn: $settingsStore.settings.uploadFailedQueries)

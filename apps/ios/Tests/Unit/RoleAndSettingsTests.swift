@@ -39,7 +39,18 @@ final class RoleAndSettingsTests: XCTestCase {
         XCTAssertEqual(s.captureIntervalMs, 200)
         XCTAssertEqual(s.obstacleRangeMeters, 5.0)
         XCTAssertFalse(s.hasNianticCredentials)
+        XCTAssertFalse(s.showNoteLabels, "the camera feed is clean unless asked for labels")
         XCTAssertNil(s.validationError)
+    }
+
+    func testNoteLabelsToggleRoundTripsAndOlderSettingsStayOff() throws {
+        let store = CameraSettingsStore(defaults: defaults, localConfig: [:])
+        store.settings.showNoteLabels = true
+        XCTAssertTrue(CameraSettingsStore(defaults: defaults, localConfig: [:]).settings.showNoteLabels)
+        // Settings persisted before the key existed decode with the default, not an error.
+        let legacy = try JSONDecoder().decode(CameraSettings.self, from: Data(#"{"captureIntervalMs": 300}"#.utf8))
+        XCTAssertEqual(legacy.captureIntervalMs, 300)
+        XCTAssertFalse(legacy.showNoteLabels)
     }
 
     func testValidationCatchesBadValues() {

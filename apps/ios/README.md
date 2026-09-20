@@ -98,13 +98,15 @@ when the wearer comes within 5 m and re-arms it only past 8 m, so standing besid
 note does not repeat it.
 
 Two surfaces show them. **Notes › Open notes** on the front screen lists them
-nearest-first with distance and direction, and works with no fix at all. The
-camera card additionally draws labels over the live feed (`NoteOverlay`),
-projecting each note back through the VPS anchor with `ARCamera.projectPoint`.
-The overlay appears **only while the anchor is `tracked`**: per the NSDK docs a
-`limited` anchor is a coarse GPS estimate, so pinning labels to the world with one
-would place them tens of metres from what they describe. The card's pill says
-which of the two you are getting — "On camera" or "List only".
+nearest-first with distance and direction, and works with no fix at all. With
+**Settings › Note labels on camera** turned on (off by default, so the camera
+card is a clean feed) the card additionally draws labels over the live feed
+(`NoteOverlay`), projecting each note back through the VPS anchor with
+`ARCamera.projectPoint`. The overlay appears **only while the anchor is
+`tracked`**: per the NSDK docs a `limited` anchor is a coarse GPS estimate, so
+pinning labels to the world with one would place them tens of metres from what
+they describe. The card's pill says which of the two you are getting — "On camera"
+or "List only". Spoken note cues do not depend on the toggle.
 
 ### Voice guide (GPT-Live through the backend)
 

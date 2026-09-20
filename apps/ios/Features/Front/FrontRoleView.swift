@@ -95,10 +95,13 @@ struct FrontRoleView: View {
             }
             .frame(height: 260)
             .clipShape(RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous))
-            .overlay(
-                NoteOverlay(pins: pipeline.notePins, onSize: { pipeline.overlaySize = $0 })
-                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous))
-            )
+            .overlay {
+                // Off by default: a clean feed. The notes list and spoken note cues are unaffected.
+                if settingsStore.settings.showNoteLabels {
+                    NoteOverlay(pins: pipeline.notePins, onSize: { pipeline.overlaySize = $0 })
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.radiusCard, style: .continuous))
+                }
+            }
 
             PillTag(text: sessionLabel, fill: sessionColor, foreground: .white, identifier: "front.sessionState")
                 .padding(AppTheme.s12)
@@ -257,8 +260,9 @@ struct FrontRoleView: View {
                     .font(.system(size: 22, weight: .bold))
                     .tracking(-0.24)
                 Spacer()
-                PillTag(text: pipeline.notesLocalized ? "On camera" : "List only",
-                        fill: pipeline.notesLocalized ? AppTheme.marigold : AppTheme.skyTint,
+                let onCamera = pipeline.notesLocalized && settingsStore.settings.showNoteLabels
+                PillTag(text: onCamera ? "On camera" : "List only",
+                        fill: onCamera ? AppTheme.marigold : AppTheme.skyTint,
                         identifier: "front.notesMode")
             }
             StatRow(label: "Pinned", value: "\(pipeline.notes.notes.count)", identifier: "front.notes.count")

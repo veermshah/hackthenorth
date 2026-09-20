@@ -518,7 +518,9 @@ final class FrontPipeline: ObservableObject {
         for due in notes.update(pose: pose) {
             speech.speak(SpokenCue(text: due.spokenCue, priority: .route))
         }
-        notePins = projectNotes(anchor: fix.anchorTransform)
+        // Projection only matters while the labels are drawn; ranking and spoken cues above run regardless.
+        let pins = settings?.showNoteLabels == true ? projectNotes(anchor: fix.anchorTransform) : []
+        if pins != notePins { notePins = pins }
     }
 
     /// Project each note into the camera preview. Site-frame positions go back
