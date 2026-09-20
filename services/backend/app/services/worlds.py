@@ -457,6 +457,8 @@ class WorldStore:
         self.sockets = {}
         # Digest of the manifest bytes each world last validated with; see world().
         self._validated = {}
+        # When each world's VPS status badge was last stamped; see stamp_vps_status.
+        self.vps_stamped = {}
 
     def lock(self, key):
         return self.locks.setdefault(key, asyncio.Lock())

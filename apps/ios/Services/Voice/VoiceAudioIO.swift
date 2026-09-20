@@ -36,9 +36,25 @@ final class CaptureState: @unchecked Sendable {
         var chunker = PCMChunker()
         var muted = false
         var rebuilds = 0
+        /// Seconds of below-threshold audio since the last speech, for the uplink gate.
+        var silence = CaptureState.hangoverSeconds
+        /// The tail of what the gate dropped, replayed ahead of the next speech so onsets survive.
+        var preroll = Data()
         var onFrame: (@Sendable (Data) -> Void)?
         var onLevel: (@Sendable (Float) -> Void)?
     }
+
+    /// The uplink is the scarcest thing the phone has: a call spends 64 KB/s on 24 kHz PCM for as
+    /// long as it is up, which is roughly one VPS query image every second, and the phone uploads
+    /// those one at a time. So the stream is gated on speech.
+    ///
+    /// This deliberately costs the voice guide a little: the Live session hears silence only for
+    /// `hangoverSeconds` after each utterance rather than continuously, and speech quieter than
+    /// `gateLevel` at the chest mount is dropped. The hangover is what the server's turn detection
+    /// needs to hear to end a turn, so it stays generous.
+    static let gateLevel: Float = 0.015
+    static let hangoverSeconds: Double = 1.0
+    static let prerollSeconds: Double = 0.2
 
     // Unchecked: the converter and closures are not Sendable, but only ever touched under this lock.
     private let lock = OSAllocatedUnfairLock(uncheckedState: Guarded())
@@ -111,12 +127,32 @@ final class CaptureState: @unchecked Sendable {
             guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData else { return }
             var data = Data(bytes: channel[0], count: Int(out.frameLength) * PCM.bytesPerSample)
             level = PCM.level(data)
+            callbacks = (state.onFrame, state.onLevel)
+            // Muted: send nothing at all. The Live session is told with session.input_audio.mute,
+            // so its timeline does not need a stream of zeros -- and zeros cost the same uplink as
+            // speech, which is uplink the query images are queued behind.
             if state.muted {
-                // Keep the Live timeline flowing with silence rather than stopping the stream.
-                data = Data(count: data.count)
+                state.chunker = PCMChunker()
+                state.preroll.removeAll()
+                state.silence = Self.hangoverSeconds
+                callbacks.0 = nil
+                return
+            }
+            state.silence = level >= Self.gateLevel ? 0 : state.silence + PCM.seconds(bytes: data.count)
+            guard state.silence < Self.hangoverSeconds else {
+                // Gate shut: hold only enough of the room to cover the next word's onset.
+                state.preroll.append(data)
+                let keep = Int(PCM.sampleRate * Self.prerollSeconds) * PCM.bytesPerSample
+                if state.preroll.count > keep { state.preroll.removeFirst(state.preroll.count - keep) }
+                _ = state.chunker.drain()
+                callbacks.0 = nil
+                return
+            }
+            if !state.preroll.isEmpty {
+                data = state.preroll + data
+                state.preroll.removeAll()
             }
             frames = state.chunker.append(data)
-            callbacks = (state.onFrame, state.onLevel)
         }
         callbacks.1?(level)
         for frame in frames {

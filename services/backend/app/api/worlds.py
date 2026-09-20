@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -19,8 +20,25 @@ logger = logging.getLogger(__name__)
 
 # Newest image queries kept per world; older JPEGs are deleted with their records.
 LOCALIZATIONS_KEPT = 50
+# The VPS status file is a freshness badge, not a data stream, and /localize arrives five times a
+# second. Every stamp takes the world lock and writes a file, which is exactly what a query image
+# upload is queued behind, so it is written at most this often.
+VPS_STATUS_INTERVAL_S = 2
 UPLOAD_SUFFIXES = ('.spz', '.ply', '.splat', '.ksplat', '.sog', '.glb', '.png', '.bin')
 QUERY_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+
+
+async def stamp_vps_status(store, world_id, timestamp, site_id):
+    """Record that the world localized just now, at most every VPS_STATUS_INTERVAL_S.
+    True when it was written, which is also when the change is worth announcing."""
+    elapsed = time.monotonic() - store.vps_stamped.get(world_id, -VPS_STATUS_INTERVAL_S)
+    if elapsed < VPS_STATUS_INTERVAL_S:
+        return False
+    store.vps_stamped[world_id] = time.monotonic()
+    async with store.lock('world:' + world_id):
+        await store.write({'lastLocalizedAt': timestamp, 'nianticSiteId': site_id},
+                          'worlds', world_id, 'vps-status.json')
+    return True
 
 
 async def body(request):
@@ -501,10 +519,10 @@ async def localize(world_id: str, request: Request):
     await navigation.pose(session['sessionId'], {k: data[k] for k in ('pose', 'timestamp', 'trackingState') if k in data},
                           allow_no_destination=True)
     if data.get('trackingState', 'localized') == 'localized':
-        async with store.lock('world:' + world_id):
-            await store.write({'lastLocalizedAt': data['timestamp'], 'nianticSiteId': data['nianticSiteId']},
-                              'worlds', world_id, 'vps-status.json')
-        await store.emit(store.session(session['sessionId']), 'localized')
+        # Throttled together: re-reading the session and telling every socket "localized" five
+        # times a second told nobody anything the pose stream had not already said.
+        if await stamp_vps_status(store, world_id, data['timestamp'], data['nianticSiteId']):
+            await store.emit(store.session(session['sessionId']), 'localized')
     return {'sessionId': session['sessionId'], 'worldId': world_id, 'pose': data['pose'],
             'nearestNode': {**node_ref(nearest), 'distanceMetres': horizontal(data['pose']['position'], nearest['position'])},
             'snappedPosition': position, 'offGraphMetres': distance}
@@ -664,9 +682,7 @@ async def localize_query(world_id: str, request: Request):
         index.update(queries=[record] + kept, updatedAt=record['receivedAt'])
         await store.write(index, 'worlds', world_id, 'localizations', 'index.json')
     if data['result']['trackingState'] == 'localized':
-        async with store.lock('world:' + world_id):
-            await store.write({'lastLocalizedAt': data['capturedAt'], 'nianticSiteId': data['nianticSiteId']},
-                              'worlds', world_id, 'vps-status.json')
+        await stamp_vps_status(store, world_id, data['capturedAt'], data['nianticSiteId'])
     return record
 
 
