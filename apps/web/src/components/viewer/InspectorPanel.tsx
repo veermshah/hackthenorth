@@ -6,6 +6,7 @@ import { AssistantPanel } from "./AssistantPanel";
 import {
   formatSplatCount,
   graphLengthMetres,
+  isAutoDetectedNote,
   measurementLength,
   type Measurement,
   type NavigationGraph,
@@ -53,6 +54,11 @@ type Props = {
   numSplats: number | null;
   graph: NavigationGraph;
   notes: WorldNote[];
+  /** How many of `notes` came from "Detect objects automatically". */
+  autoNoteCount: number;
+  /** True while those pins are kept off the 3D scan; they stay in the list either way. */
+  hideAutoNotes: boolean;
+  onHideAutoNotes: (hidden: boolean) => void;
   measurements: Measurement[];
   selection: ViewerSelection | null;
   /** Current camera position (world frame), for the Ask tab's "what's in view" context. */
@@ -194,6 +200,27 @@ function NotesTab(p: Props) {
       </button>
       {detectMessage && <p className="mt-1.5 px-1 text-caption text-void-black/60">{detectMessage}</p>}
 
+      {p.autoNoteCount > 0 && (
+        <div className="mt-2 flex items-center gap-2.5 rounded-lg border border-hairline bg-stellar-white px-2.5 py-2">
+          <Icon
+            name={p.hideAutoNotes ? "eyeOff" : "eye"}
+            size={15}
+            className={p.hideAutoNotes ? "text-void-black/40" : "text-wander-blue"}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="block text-body-sm font-medium text-void-black/90">Auto-detected pins</span>
+            <span className="block text-caption text-void-black/50">
+              {p.autoNoteCount} {p.hideAutoNotes ? "hidden from the scan" : "shown on the scan"}
+            </span>
+          </span>
+          <Switch
+            checked={!p.hideAutoNotes}
+            onChange={(shown) => p.onHideAutoNotes(!shown)}
+            label="Show auto-detected pins on the scan"
+          />
+        </div>
+      )}
+
       {p.notes.length === 0 ? (
         <p className="mt-4 px-1 text-body-sm text-void-black/50">
           No pins yet. Pick the tool (or press <kbd className="rounded-sm border border-hairline px-1">3</kbd>) and
@@ -204,20 +231,26 @@ function NotesTab(p: Props) {
         <ol className="mt-3 space-y-1">
           {p.notes.map((n, i) => {
             const isSel = n.id === selectedId;
+            const hidden = p.hideAutoNotes && isAutoDetectedNote(n);
             return (
               <li key={n.id}>
                 <button
                   type="button"
                   onClick={() => p.onSelect(isSel ? null : { kind: "note", id: n.id })}
-                  onDoubleClick={() => p.onFocusNote(n.id)}
-                  title="Click to open · double-click to fly to"
+                  onDoubleClick={() => !hidden && p.onFocusNote(n.id)}
+                  title={hidden ? "Hidden on the scan · click to open" : "Click to open · double-click to fly to"}
                   className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors duration-200 ${
                     isSel ? "bg-sky-tint" : "hover:bg-void-black/5"
                   }`}
                 >
                   <span className="mt-0.5 w-4 text-right text-caption text-void-black/40">{i + 1}</span>
-                  <span aria-hidden="true" className="mt-1.5 inline-block size-2.5 shrink-0 rounded-full bg-wander-pink" />
-                  <span className="min-w-0 flex-1">
+                  <span
+                    aria-hidden="true"
+                    className={`mt-1.5 inline-block size-2.5 shrink-0 rounded-full ${
+                      hidden ? "border border-void-black/25" : "bg-wander-pink"
+                    }`}
+                  />
+                  <span className={`min-w-0 flex-1 ${hidden ? "opacity-55" : ""}`}>
                     <span className={`block truncate text-body-sm ${isSel ? "font-medium text-wander-blue" : "text-void-black/80"}`}>
                       {n.title || "Untitled pin"}
                     </span>
@@ -228,11 +261,14 @@ function NotesTab(p: Props) {
                       </span>
                     )}
                   </span>
+                  {/* The button's title carries this for screen readers; the icon is decorative. */}
+                  {hidden && <Icon name="eyeOff" size={13} className="mt-1 text-void-black/35" />}
                 </button>
                 {isSel && (
                   <NoteEditor
                     key={n.id}
                     note={n}
+                    hidden={hidden}
                     onChange={(patch) => p.onUpdateNote(n.id, patch)}
                     onFocus={() => p.onFocusNote(n.id)}
                     onDelete={() => p.onDeleteNote(n.id)}
@@ -249,11 +285,14 @@ function NotesTab(p: Props) {
 
 function NoteEditor({
   note,
+  hidden,
   onChange,
   onFocus,
   onDelete,
 }: {
   note: WorldNote;
+  /** The pin is switched off on the scan, so there is nothing to fly to. */
+  hidden: boolean;
   onChange: (patch: Partial<Pick<WorldNote, "title" | "location" | "description">>) => void;
   onFocus: () => void;
   onDelete: () => void;
@@ -332,7 +371,13 @@ function NoteEditor({
           {note.position.map((v) => v.toFixed(2)).join(", ")}
         </span>
         <span className="flex items-center gap-1">
-          <button type="button" className="btn-text px-2 py-1 text-caption" onClick={onFocus}>
+          <button
+            type="button"
+            className="btn-text px-2 py-1 text-caption"
+            onClick={onFocus}
+            disabled={hidden}
+            title={hidden ? "Hidden on the scan — switch auto-detected pins back on to fly to it" : undefined}
+          >
             <Icon name="frame" size={13} />
             Fly to
           </button>
@@ -349,8 +394,40 @@ function NoteEditor({
       <p className="text-caption text-void-black/40">
         Added {new Date(note.createdAt).toLocaleString()}
         {note.updatedAt && ` · edited ${new Date(note.updatedAt).toLocaleString()}`}
+        {hidden && " · hidden on the scan"}
       </p>
     </div>
+  );
+}
+
+/** Small on/off switch — Wander Blue when on, hairline track when off. */
+function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors duration-200 ${
+        checked ? "border-wander-blue bg-wander-blue" : "border-hairline bg-void-black/10"
+      }`}
+    >
+      <span
+        aria-hidden="true"
+        className={`inline-block size-3.5 rounded-full bg-pure-white transition-transform duration-200 ${
+          checked ? "translate-x-[18px]" : "translate-x-[3px]"
+        }`}
+      />
+    </button>
   );
 }
 

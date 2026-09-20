@@ -18,6 +18,7 @@ import {
   assetUrl,
   EMPTY_GRAPH,
   formatSplatCount,
+  isAutoDetectedNote,
   type Measurement,
   type NavigationGraph,
   type Vec3,
@@ -104,6 +105,14 @@ export function WorldViewer({
   const shownGraph = meshTools.preview && meshTools.proposal ? meshTools.proposal.graph : graph;
   const [notes, setNotes] = useState(initialNotes);
   const knownNoteIds = useRef(new Set(initialNotes.map((note) => note.id)));
+  /** Auto-detected pins arrive by the dozen; hiding them clears the scan without deleting them. */
+  const [hideAutoNotes, setHideAutoNotes] = useState(false);
+  const autoNoteCount = useMemo(() => notes.filter(isAutoDetectedNote).length, [notes]);
+  /** What the engine pins to the scan — the list in the panel still shows every note. */
+  const shownNotes = useMemo(
+    () => (hideAutoNotes ? notes.filter((n) => !isAutoDetectedNote(n)) : notes),
+    [notes, hideAutoNotes],
+  );
   const [measurements, setMeasurements] = useState(initialMeasurements);
   const [selection, setSelection] = useState<ViewerSelection | null>(null);
   const [pendingPoint, setPendingPoint] = useState<Vec3 | null>(null);
@@ -289,7 +298,7 @@ export function WorldViewer({
     alignment: manifest?.alignment,
     graph: shownGraph,
     graphFlags: meshTools.flags,
-    notes,
+    notes: shownNotes,
     measurements,
     selection,
     pendingPoint,
@@ -509,6 +518,9 @@ export function WorldViewer({
               numSplats={state.numSplats}
               graph={shownGraph}
               notes={notes}
+              autoNoteCount={autoNoteCount}
+              hideAutoNotes={hideAutoNotes}
+              onHideAutoNotes={setHideAutoNotes}
               measurements={measurements}
               selection={selection}
               getCameraPosition={api.getCameraPosition}
@@ -530,6 +542,8 @@ export function WorldViewer({
                 const added = detected.filter((note) => !knownNoteIds.current.has(note.id));
                 for (const note of added) knownNoteIds.current.add(note.id);
                 setNotes((current) => [...current, ...added]);
+                // Someone who just asked for a detection wants to see its pins, hidden or not.
+                if (added.length) setHideAutoNotes(false);
               }}
               onStartNote={() => pickTool("note")}
               onStartMeasure={() => pickTool("measure")}

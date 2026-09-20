@@ -142,6 +142,14 @@ export type WorldNote = {
   updatedAt?: string;
 };
 
+/** Author the object detector stamps on the pins it places (see `candidates_to_notes`). */
+export const AUTO_NOTE_AUTHOR = "auto-detected";
+
+/** True for a pin dropped by "Detect objects automatically" rather than by hand. */
+export function isAutoDetectedNote(note: WorldNote): boolean {
+  return note.author === AUTO_NOTE_AUTHOR || note.id.startsWith("auto-");
+}
+
 export const NOTES_SCHEMA = "wander.notes/v1";
 
 /** `worlds/<id>/notes.json` on the volume. */
