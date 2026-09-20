@@ -268,3 +268,76 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Motion & elevation upgrades — craft borrowed from Viaere, Wander palette.
+   Spring beziers, blur-fade entrances, tinted layered shadows, tap feedback.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --ease-fluid: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lift: 0 24px 60px rgba(15, 23, 42, 0.14), 0 8px 20px rgba(15, 23, 42, 0.08);
+  --shadow-phone: 0 30px 60px rgba(15, 23, 42, 0.30), 0 10px 22px rgba(15, 23, 42, 0.18);
+}
+
+/* Physical press feedback (opt-in via class) */
+.tap { transition: transform 160ms var(--ease-fluid); }
+.tap:active { transform: scale(0.98); }
+
+/* Blur-fade-up entrance for above-fold elements (CSS-only, no JS needed) */
+@keyframes blur-fade-up {
+  0% { opacity: 0; transform: translateY(28px); filter: blur(8px); }
+  100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+.reveal { animation: blur-fade-up 800ms var(--ease-spring) both; animation-delay: var(--reveal-delay, 0ms); }
+
+/* Gentle float loop for accent glows */
+@keyframes soft-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+.float-slow { animation: soft-float 6s var(--ease-fluid) infinite; }
+
+/* Tabular numerics for stats / meter readings */
+.num { font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+
+/* Gaussian-splat speck texture for the product canvas */
+.splat-specks {
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.10) 1px, transparent 1.5px),
+    radial-gradient(rgba(96, 186, 244, 0.16) 1px, transparent 1.5px);
+  background-size: 22px 22px, 34px 34px;
+  background-position: 0 0, 11px 11px;
+}
+
+/* Marquee (adapted from Magic UI) — infinite logo scroll with faded edges */
+@keyframes marquee { to { transform: translateX(-50%); } }
+.marquee-mask {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+.marquee-track {
+  display: flex;
+  width: max-content;
+  animation: marquee var(--marquee-duration, 30s) linear infinite;
+}
+.marquee-mask:hover .marquee-track { animation-play-state: paused; }
+
+/* Interaction — hover lift on surfaces that feel interactive; button raise.
+   Only applied to elements that read as tappable (cards, product surfaces,
+   buttons), never to body copy or decorative marks. */
+/* Flat at rest (hairline only, per FRONTEND_STYLE); a gentle lift on hover. */
+.hover-lift {
+  transition: transform 220ms var(--ease-fluid), box-shadow 220ms var(--ease-fluid);
+}
+.hover-lift:hover { transform: translateY(-4px); box-shadow: var(--shadow-card); }
+
+.elev {
+  box-shadow: var(--shadow-lift);
+  transition: transform 260ms var(--ease-fluid), box-shadow 260ms var(--ease-fluid);
+}
+.elev:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 34px 80px rgba(15, 23, 42, 0.18), 0 12px 26px rgba(15, 23, 42, 0.10);
+}
+
+.hover-raise { transition: transform 180ms var(--ease-fluid); }
+.hover-raise:hover { transform: translateY(-1px); }
