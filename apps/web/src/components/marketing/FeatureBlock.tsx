@@ -15,7 +15,9 @@ type Props = {
   bullets: Bullet[];
   /** Background class for the accent panel, e.g. "bg-wander-pink". */
   panelClass: string;
-  asset: ImageAsset;
+  /** Live-HTML visual for the panel; falls back to the image asset. */
+  visual?: ReactNode;
+  asset?: ImageAsset;
   /** Panel on the left, copy on the right. */
   reverse?: boolean;
 };
@@ -29,6 +31,7 @@ export function FeatureBlock({
   body,
   bullets,
   panelClass,
+  visual,
   asset,
   reverse,
 }: Props) {
@@ -58,11 +61,14 @@ export function FeatureBlock({
         </div>
 
         <div className={`card-accent min-w-0 ${panelClass} p-5 md:p-8`}>
-          <ImageSlot
-            asset={asset}
-            sizes="(min-width: 1024px) 45vw, 100vw"
-            className="rounded-lg shadow-[var(--shadow-mockup)]"
-          />
+          {visual ??
+            (asset ? (
+              <ImageSlot
+                asset={asset}
+                sizes="(min-width: 1024px) 45vw, 100vw"
+                className="rounded-lg shadow-[var(--shadow-mockup)]"
+              />
+            ) : null)}
         </div>
       </div>
     </section>

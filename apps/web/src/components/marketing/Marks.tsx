@@ -8,7 +8,7 @@ const HERO_MARKS: { icon: IconName; color: string }[] = [
   { icon: "compass", color: "#2e4885" },
   { icon: "pin", color: "#d85598" },
   { icon: "mic", color: "#1e293b" },
-  { icon: "camera", color: "#3a8fd0" },
+  { icon: "camera", color: "#60baf4" },
   { icon: "route", color: "#2e4885" },
   { icon: "phone", color: "#d85598" },
   { icon: "sparkle", color: "#1e293b" },
@@ -23,7 +23,7 @@ type MarkProps = {
   style?: CSSProperties;
 };
 
-/** Character mark: 40–48px white circle, 2px colored ring, flat glyph inside. */
+/** Character mark: 40-48px white circle, 2px colored ring, flat glyph inside. */
 export function CharacterMark({
   icon,
   color,
