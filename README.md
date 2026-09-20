@@ -4,7 +4,7 @@
 
 Built at Hack the North by four people in one weekend. Not a replacement for the white cane — the layer it was never meant to cover.
 
-![Architecture: a chest-worn iPhone localizes against Niantic VPS and streams poses to a FastAPI backend on Modal, which routes over a waypoint graph, talks to OpenAI and Elasticsearch, and serves a Next.js companion web app for sighted helpers.](docs/diagrams/architecture.png)
+![Architecture: a chest-worn iPhone localizes against Niantic VPS and streams poses to a FastAPI backend on Modal, which routes over a waypoint graph, talks to OpenAI and Elasticsearch, and serves a Next.js companion web app for sighted helpers.](docs/architecture.png)
 
 ## Contents
 
@@ -42,7 +42,7 @@ Put a chair in the path and the guidance tells you what's there and offers a way
 
 ### From a scan to a spoken route
 
-![Swimlane: a Scaniverse scan becomes a Niantic VPS site and a splat that a helper aligns in the web app; the backend proposes a waypoint graph from the mesh, the helper reviews and publishes it, and at walk time the phone localizes, the backend routes with A*, and the phone speaks and buzzes the cues.](docs/diagrams/pipeline.png)
+![Swimlane: a Scaniverse scan becomes a Niantic VPS site and a splat that a helper aligns in the web app; the backend proposes a waypoint graph from the mesh, the helper reviews and publishes it, and at walk time the phone localizes, the backend routes with A*, and the phone speaks and buzzes the cues.](docs/pipeline.png)
 
 1. **Capture.** Scaniverse produces an `.spz` Gaussian splat and a mesh; the same walk becomes a Niantic Spatial VPS site.
 2. **Align.** The helper imports the splat into the web app and aligns it to the VPS frame — `p_world = R · (s · p_splat) + t`. Every downstream artifact lives in the frame the phone actually localizes in.
@@ -54,7 +54,7 @@ Put a chair in the path and the guidance tells you what's there and offers a way
 
 ### "Guide me to Bed 1"
 
-![Sequence: the chest phone streams microphone audio to the backend, which bridges it to GPT-Live; the voice delegates the request to a Responses agent whose tools resolve the destination, the backend runs A* and feeds each cue back to the voice as commentary, and while walking the phone sends poses, receives cues, and pulses the side phones.](docs/diagrams/sequence.png)
+![Sequence: the chest phone streams microphone audio to the backend, which bridges it to GPT-Live; the voice delegates the request to a Responses agent whose tools resolve the destination, the backend runs A* and feeds each cue back to the voice as commentary, and while walking the phone sends poses, receives cues, and pulses the side phones.](docs/sequence.png)
 
 The phone streams PCM audio over a WebSocket relay; the backend bridges it to a GPT-Live session. When the wearer asks for something that needs the map, GPT-Live delegates to a Responses API agent whose function tools (`get_current_location`, `resolve_destination`, `set_destination`, `stop_navigation`, `search_places`) read route state and map facts. Routes are computed only by the deterministic backend — the model never invents a position or a path. Every navigation cue is fed back into the Live session as commentary, so guidance and conversation come from one voice.
 
