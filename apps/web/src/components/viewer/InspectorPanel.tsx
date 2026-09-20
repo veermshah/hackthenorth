@@ -31,7 +31,7 @@ export const NODE_TONE: Record<NavNodeKind, string> = {
 const TABS: { id: PanelTab; label: string }[] = [
   { id: "live", label: "Live" },
   { id: "ask", label: "Ask" },
-  { id: "notes", label: "Notes" },
+  { id: "notes", label: "Pins" },
   { id: "measure", label: "Measure" },
   { id: "waypoints", label: "Waypoints" },
   { id: "details", label: "Details" },
@@ -62,7 +62,7 @@ type Props = {
   onFocusNote: (id: string) => void;
   onUpdateNote: (id: string, patch: Partial<Pick<WorldNote, "title" | "location" | "description">>) => void;
   onDeleteNote: (id: string) => void;
-  /** Replaces the notes list after POST /api/worlds/:id/notes/auto-detect adds new pins. */
+  /** Replaces the pin list after POST /api/worlds/:id/notes/auto-detect adds new pins. */
   onNotesDetected: (notes: WorldNote[]) => void;
   onStartNote: () => void;
   onStartMeasure: () => void;
@@ -75,7 +75,7 @@ type Props = {
   onSaveSiteId?: (siteId: string | null) => Promise<void>;
 };
 
-/** Right-hand panel: write notes, review measurements, read the manifest and waypoints. */
+/** Right-hand panel: write pins, review measurements, read the manifest and waypoints. */
 export function InspectorPanel(p: Props) {
   const now = useNow(5000);
   return (
@@ -171,7 +171,7 @@ function NotesTab(p: Props) {
       setDetectMessage(
         added === 0
           ? "No new objects found — try scanning more of the room with the phone first."
-          : `Added ${added} note${added === 1 ? "" : "s"}${body.skippedDuplicates ? ` (skipped ${body.skippedDuplicates} already-known)` : ""}.`,
+          : `Added ${added} pin${added === 1 ? "" : "s"}${body.skippedDuplicates ? ` (skipped ${body.skippedDuplicates} already-known)` : ""}.`,
       );
     } catch (err) {
       setDetectMessage(err instanceof Error ? err.message : "Could not detect objects");
@@ -184,7 +184,7 @@ function NotesTab(p: Props) {
     <div className="p-3">
       <button type="button" className="btn-ghost w-full" onClick={p.onStartNote}>
         <Icon name="pin" size={15} />
-        Add a note on the scan
+        Add a pin on the scan
       </button>
       <button type="button" className="btn-ghost mt-1.5 w-full" onClick={detectObjects} disabled={detecting}>
         <Icon name="sparkle" size={15} />
@@ -194,8 +194,8 @@ function NotesTab(p: Props) {
 
       {p.notes.length === 0 ? (
         <p className="mt-4 px-1 text-body-sm text-void-black/50">
-          No notes yet. Pick the tool (or press <kbd className="rounded-sm border border-hairline px-1">3</kbd>) and
-          click the scan where you want to pin a title, location and description. Notes save to the world
+          No pins yet. Pick the tool (or press <kbd className="rounded-sm border border-hairline px-1">3</kbd>) and
+          click the scan where you want to drop a title, location and description. Pins save to the world
           automatically.
         </p>
       ) : (
@@ -217,7 +217,7 @@ function NotesTab(p: Props) {
                   <span aria-hidden="true" className="mt-1.5 inline-block size-2.5 shrink-0 rounded-full bg-wander-pink" />
                   <span className="min-w-0 flex-1">
                     <span className={`block truncate text-body-sm ${isSel ? "font-medium text-wander-blue" : "text-void-black/80"}`}>
-                      {n.title || "Untitled note"}
+                      {n.title || "Untitled pin"}
                     </span>
                     {(n.location || n.description) && !isSel && (
                       <span className="block truncate text-caption text-void-black/50">
@@ -263,7 +263,7 @@ function NoteEditor({
 
   const commit = () =>
     onChange({
-      title: title.trim() || "Untitled note",
+      title: title.trim() || "Untitled pin",
       location: location.trim() || undefined,
       description: description.trim() || undefined,
     });

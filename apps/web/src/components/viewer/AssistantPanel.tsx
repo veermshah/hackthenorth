@@ -48,14 +48,14 @@ function describeSelection(graph: NavigationGraph, notes: WorldNote[], selection
   if (!note) return null;
   const location = note.location ? ` (${note.location})` : "";
   const description = note.description ? `: ${note.description}` : "";
-  return `Selected note "${note.title}"${location}${description}`;
+  return `Selected pin "${note.title}"${location}${description}`;
 }
 
 function distance(a: Vec3, b: Vec3): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
 
-/** Nearest mapped waypoints/notes to the current camera position, for questions like
+/** Nearest mapped waypoints/pins to the current camera position, for questions like
  * "what can you see" that aren't about one specific selected pin. Graph nodes only count
  * when the graph is in the world frame (the default) — a `"splat"`-frame graph would need
  * the alignment transform this Vec3 doesn't carry, so it's left out rather than guessed. */
@@ -66,7 +66,7 @@ function describeNearby(position: Vec3, graph: NavigationGraph, notes: WorldNote
   if ((graph.frame ?? "world") === "world") {
     for (const node of graph.nodes) candidates.push({ label: node.name ?? node.id, distanceM: distance(position, node.position) });
   }
-  for (const note of notes) candidates.push({ label: note.title || "Untitled note", distanceM: distance(position, note.position) });
+  for (const note of notes) candidates.push({ label: note.title || "Untitled pin", distanceM: distance(position, note.position) });
   const nearby = candidates
     .filter((c) => c.distanceM <= RADIUS_M)
     .sort((a, b) => a.distanceM - b.distanceM)

@@ -62,7 +62,7 @@ const MODES: { id: ViewerMode; label: string; icon: IconName }[] = [
 const TOOLS: { id: ViewerTool; label: string; icon: IconName; key: string }[] = [
   { id: "navigate", label: "Navigate", icon: "pointer", key: "1" },
   { id: "measure", label: "Measure", icon: "ruler", key: "2" },
-  { id: "note", label: "Add note", icon: "pin", key: "3" },
+  { id: "note", label: "Add pin", icon: "pin", key: "3" },
 ];
 
 const AUTOSAVE_MS = 900;
@@ -76,7 +76,7 @@ const isEditing = () => {
 
 /**
  * Full-viewport world editor: the splat canvas fills the page; a floating
- * header, a bottom tool dock and a collapsible inspector sit on top. Notes and
+ * header, a bottom tool dock and a collapsible inspector sit on top. Pins and
  * measurements live here, are pushed into the engine via the hook, and
  * autosave to the world through /api/worlds.
  */
@@ -216,7 +216,7 @@ export function WorldViewer({
     const id = `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     setNotes((list) => [
       ...list,
-      { id, title: `Note ${list.length + 1}`, position, createdAt: new Date().toISOString() },
+      { id, title: `Pin ${list.length + 1}`, position, createdAt: new Date().toISOString() },
     ]);
     setSelection({ kind: "note", id });
     setPanelOpen(true);
@@ -619,7 +619,7 @@ export function WorldViewer({
 function SaveBadge({ save, canSave, onRetry }: { save: SaveState; canSave: boolean; onRetry: () => void }) {
   if (!canSave)
     return (
-      <span className="pill-sm bg-stellar-white text-void-black/60" title="Add world.json to this world to persist notes">
+      <span className="pill-sm bg-stellar-white text-void-black/60" title="Add world.json to this world to persist pins">
         Not saved · no world.json
       </span>
     );
@@ -698,7 +698,7 @@ const MOVE_HINT = "W A S D move · Q / E height · Arrows turn · Shift hurry";
 
 function hintFor(tool: ViewerTool, mode: ViewerMode, pending: boolean): string {
   if (tool === "measure") return pending ? "Click the second point · Esc cancels" : "Click a point on the scan to start measuring";
-  if (tool === "note") return "Click the scan to pin a note · Esc to finish";
+  if (tool === "note") return "Click the scan to drop a pin · Esc to finish";
   return mode === "walk" ? MOVE_HINT : `Drag to orbit · Scroll to zoom · ${MOVE_HINT}`;
 }
 

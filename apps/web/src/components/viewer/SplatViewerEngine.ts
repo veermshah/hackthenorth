@@ -75,6 +75,9 @@ const WHITE = 0xffffff;
 const SLATE = 0x475569;
 
 const NODE_RADIUS = 0.045;
+/** Splat and mesh hits closer together than this describe the same surface; see `intersectScene`. */
+const SURFACE_TIE_M = 0.25;
+
 /** Waypoint click radius in pixels: the dots are drawn small, so they are picked in screen space. */
 const NODE_PICK_PX = 14;
 const MESH_COLOR = 0x94a3b8;
@@ -88,8 +91,13 @@ const MEASURE_LINE_RADIUS = 0.006;
 const EYE_HEIGHT = 1.6;
 /** Walking pace in metres per second; orbit mode scales this with distance to the pivot. */
 const WALK_SPEED = 1.6;
+/**
+ * A press that travels further than this is an orbit/look drag, not a click. There is
+ * deliberately no time limit alongside it: aiming a pin takes as long as it takes, and on a
+ * heavy scan the pointerup itself can arrive late, so a stationary press stays a click
+ * however long it is held.
+ */
 const CLICK_MAX_PX = 5;
-const CLICK_MAX_MS = 400;
 const HOVER_THROTTLE_MS = 70;
 const X_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
 const ORBIT_DIRECTION = new THREE.Vector3(0.65, 0.55, 0.85).normalize();
@@ -223,7 +231,7 @@ export class SplatViewerEngine {
   private mode: ViewerMode = "orbit";
   private tool: ViewerTool = "navigate";
   private pendingPoint: THREE.Vector3 | null = null;
-  private pointerDown: { x: number; y: number; t: number; id: number } | null = null;
+  private pointerDown: { x: number; y: number; id: number } | null = null;
   private lastHover = 0;
   private lastTime = 0;
   private disposed = false;
@@ -380,7 +388,7 @@ export class SplatViewerEngine {
     for (const l of this.labels) if (l.el.dataset.kind === "node") l.el.hidden = !visible;
   }
 
-  /** Draw the splat or the collision mesh. The hidden one still catches picks (the mesh is the cleaner surface). */
+  /** Draw the splat or the collision mesh. The hidden one still catches picks, nearest surface first. */
   setLayer(layer: ViewerLayer) {
     this.layer = layer;
     this.applyLayer();
@@ -795,15 +803,14 @@ export class SplatViewerEngine {
     // Any click on the scene should make the keyboard controls live.
     this.opts.container.focus({ preventScroll: true });
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    this.pointerDown = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
+    this.pointerDown = { x: e.clientX, y: e.clientY, id: e.pointerId };
   };
 
   private onPointerUp = (e: PointerEvent) => {
     const d = this.pointerDown;
     this.pointerDown = null;
     if (!d || d.id !== e.pointerId) return;
-    const moved = Math.hypot(e.clientX - d.x, e.clientY - d.y);
-    if (moved > CLICK_MAX_PX || performance.now() - d.t > CLICK_MAX_MS) return;
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_MAX_PX) return;
     this.pick(e);
   };
 
@@ -875,18 +882,33 @@ export class SplatViewerEngine {
     this.raycaster.setFromCamera(ndc, this.camera);
   }
 
-  /** Nearest surface under the pointer: the collision mesh when there is one (a real surface), else the splat. */
+  /**
+   * Nearest surface under the pointer, taking the splat and the collision mesh together.
+   * The mesh is the cleaner surface, but a Scaniverse `.glb` is only the wall planes it
+   * managed to reconstruct: preferring it outright dropped the pin on a slab metres behind
+   * (or beside) whatever the click was aimed at, and floors have no mesh at all. So the
+   * first surface the ray reaches wins, and the drawn layer only breaks a near-tie — the
+   * two describe the same wall there, and the mesh gives the tidier point.
+   */
   private intersectScene(e?: PointerEvent): (THREE.Intersection & { surface: "mesh" | "splat" }) | null {
     if (e) this.setRayFromEvent(e);
-    if (this.collisionMeshes.length) {
-      this.meshGroup.updateMatrixWorld(true);
-      const hits: THREE.Intersection[] = [];
-      for (const m of this.collisionMeshes) m.raycast(this.raycaster, hits);
-      hits.sort((a, b) => a.distance - b.distance);
-      if (hits[0]) return { ...hits[0], surface: "mesh" };
-    }
+    const mesh = this.intersectCollision();
     const splat = this.intersectSplat();
-    return splat ? { ...splat, surface: "splat" } : null;
+    if (!mesh) return splat ? { ...splat, surface: "splat" } : null;
+    if (!splat) return { ...mesh, surface: "mesh" };
+    const tie = Math.abs(mesh.distance - splat.distance) <= SURFACE_TIE_M;
+    const preferMesh = tie ? this.meshGroup.visible : mesh.distance < splat.distance;
+    return preferMesh ? { ...mesh, surface: "mesh" } : { ...splat, surface: "splat" };
+  }
+
+  /** Nearest hit on the aligned collision mesh, drawn or not. */
+  private intersectCollision(): THREE.Intersection | null {
+    if (!this.collisionMeshes.length) return null;
+    this.meshGroup.updateMatrixWorld(true);
+    const hits: THREE.Intersection[] = [];
+    for (const m of this.collisionMeshes) m.raycast(this.raycaster, hits);
+    hits.sort((a, b) => a.distance - b.distance);
+    return hits[0] ?? null;
   }
 
   private intersectSplat(): THREE.Intersection | null {
