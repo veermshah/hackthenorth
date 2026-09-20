@@ -520,13 +520,15 @@ export async function createWorld(input: CreateWorldInput): Promise<WorldManifes
       body: JSON.stringify(body),
       cache: "no-store",
     });
-    if (res.status === 409) throw new WorldsApiError(409, "A world with this id already exists");
+    if (res.status === 409)
+      throw new WorldsApiError(409, "A world with this id already exists — pick another id, or delete it from the dashboard");
     if (!res.ok) throw await apiError(res);
     return parseManifest(await res.json());
   }
 
   const dir = join(ASSETS_DIR, "worlds", input.id);
-  if (existsSync(join(dir, "world.json"))) throw new WorldsApiError(409, "A world with this id already exists");
+  if (existsSync(join(dir, "world.json")))
+    throw new WorldsApiError(409, "A world with this id already exists — pick another id, or delete it from the dashboard");
   const manifest: WorldManifest = {
     schema: WORLD_SCHEMA,
     id: input.id,
@@ -615,14 +617,27 @@ export async function deleteWorld(id: string): Promise<boolean> {
  */
 export type UploadTarget =
   | { mode: "direct"; url: string; header: string; token: string; expiresAt: number }
-  | { mode: "proxy" };
+  /**
+   * The bytes come back through this app. `maxBytes` is set only where a platform
+   * caps the request body of a route handler (Vercel: 4.5 MB), so the browser can
+   * refuse a file it knows will be rejected instead of sending it and reading a 413.
+   * `reason` explains why the direct path was unavailable, when we know.
+   */
+  | { mode: "proxy"; maxBytes?: number; reason?: string };
+
+/** Vercel rejects request bodies over this before a route handler ever runs. */
+const VERCEL_BODY_LIMIT = 4.5 * 1024 * 1024;
+
+function proxyTarget(reason?: string): UploadTarget {
+  return process.env.VERCEL ? { mode: "proxy", maxBytes: VERCEL_BODY_LIMIT, reason } : { mode: "proxy", reason };
+}
 
 export async function uploadTarget(segments: string[]): Promise<UploadTarget> {
   if (segments.length !== 3 || !segments.every(isSafeSegment)) throw new WorldsApiError(400, "Invalid asset path");
   const file = segments[2];
   if (!UPLOAD_EXTENSIONS.has(extname(file).toLowerCase()))
     throw new WorldsApiError(400, `Unsupported file type "${extname(file)}"`);
-  if (!API_URL) return { mode: "proxy" };
+  if (!API_URL) return proxyTarget();
   if (SPLAT_EXTENSIONS.has(extname(file).toLowerCase()) && file !== API_SPLAT_FILENAME)
     throw new WorldsApiError(400, API_SPZ_ONLY);
 
@@ -634,7 +649,13 @@ export async function uploadTarget(segments: string[]): Promise<UploadTarget> {
   });
   if (res.status === 409) throw new WorldsApiError(409, "That version already has this file — upload a new version");
   // An older backend has no ticket route; fall back to proxying, which still works below 4.5 MB.
-  if (res.status === 404 || res.status === 405) return { mode: "proxy" };
+  if (res.status === 404 || res.status === 405) return proxyTarget();
+  // 503 is the backend saying direct uploads are switched off (no WANDER_WEB_ORIGINS).
+  // Proxying is the only route left, so carry its reason through for the error message.
+  if (res.status === 503) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    return proxyTarget(typeof body?.detail === "string" ? body.detail : undefined);
+  }
   if (!res.ok) throw await apiError(res);
   const ticket = (await res.json()) as { token: string; expiresAt: number; header: string };
   return {

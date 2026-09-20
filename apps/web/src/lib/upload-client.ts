@@ -27,7 +27,10 @@ async function readError(res: Response, fallback: string): Promise<string> {
 
 type UploadTarget =
   | { mode: "direct"; url: string; header: string; token: string; expiresAt: number }
-  | { mode: "proxy" };
+  | { mode: "proxy"; maxBytes?: number; reason?: string };
+
+const BACKEND_UNREACHABLE =
+  "The browser could not reach the worlds backend. It has to allow this site's origin — set WANDER_WEB_ORIGINS on the backend and redeploy.";
 
 /**
  * Ask the server where this file's bytes should go.
@@ -62,6 +65,15 @@ export async function uploadSplatFile(
   signal?: AbortSignal,
 ): Promise<{ path: string; bytes: number }> {
   const target = await resolveTarget(worldId, version, file.name, signal);
+  if (target.mode === "proxy" && target.maxBytes !== undefined && file.size > target.maxBytes) {
+    // Sending it would come back as an opaque platform 413, so say what is actually wrong.
+    throw new UploadError(
+      413,
+      target.reason
+        ? `${formatBytes(file.size)} is too large to upload through this site (limit ${formatBytes(target.maxBytes)}). ${target.reason}.`
+        : `${formatBytes(file.size)} is too large to upload through this site (limit ${formatBytes(target.maxBytes)}).`,
+    );
+  }
   const url = target.mode === "direct" ? target.url : assetPath(worldId, version, file.name);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -69,7 +81,10 @@ export async function uploadSplatFile(
     xhr.setRequestHeader("content-type", "application/octet-stream");
     if (target.mode === "direct") xhr.setRequestHeader(target.header, target.token);
     xhr.upload.onprogress = (e) => onProgress({ loaded: e.loaded, total: e.lengthComputable ? e.total : file.size });
-    xhr.onerror = () => reject(new UploadError(0, "Network error while uploading"));
+    // A direct PUT that never reaches the server is almost always the backend refusing
+    // this origin: the browser blocks it at the preflight and reports nothing useful.
+    xhr.onerror = () =>
+      reject(new UploadError(0, target.mode === "direct" ? BACKEND_UNREACHABLE : "Network error while uploading"));
     xhr.onabort = () => reject(new UploadError(0, "Upload cancelled"));
     xhr.onload = () => {
       let body: { path?: string; bytes?: number; error?: string; detail?: string } = {};
@@ -125,10 +140,20 @@ export async function createWorldWithSplat(
   if (input.file) {
     onStage("Uploading splat");
     const file = renameFile(input.file, safeFilename(input.file.name));
-    await uploadSplatFile(manifest.id, manifest.version, file, onProgress, signal);
+    try {
+      await uploadSplatFile(manifest.id, manifest.version, file, onProgress, signal);
+    } catch (err) {
+      // Nothing landed, so the world we just made is an empty draft holding its id
+      // hostage: the next attempt would fail with "a world with this id already exists"
+      // and hide the real error. Take it back out and report what actually went wrong.
+      await discardWorld(manifest.id);
+      throw err;
+    }
   }
   if (input.mesh) {
     onStage("Uploading mesh");
+    // The splat is already stored by now, so a mesh failure keeps the world: losing a
+    // large upload to a missing .glb would be worse than a world without a mesh.
     await uploadMeshForWorld(manifest, input.mesh, onProgress, signal);
   }
 
@@ -194,6 +219,15 @@ export async function uploadMeshForWorld(
     if (err instanceof UploadError && err.status === 409)
       throw new UploadError(409, `${manifest.version} already has a mesh — upload a new splat version first, then add the mesh to it`);
     throw err;
+  }
+}
+
+/** Best-effort rollback of a world this module just created; never masks the original failure. */
+async function discardWorld(id: string): Promise<void> {
+  try {
+    await fetch(`/api/worlds/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch {
+    /* the upload error is the one worth reporting */
   }
 }
 

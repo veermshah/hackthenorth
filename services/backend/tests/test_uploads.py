@@ -23,6 +23,7 @@ def seeded(settings):
 
 @pytest.fixture
 def client(seeded):
+    seeded.wander_web_origins = 'https://wander.example'
     app = create_app(seeded, model=ScriptedModel([]), events=FixtureEvents(), search=FixtureSearch())
     with TestClient(app, headers={'X-API-Key': seeded.wander_api_key}) as value:
         yield value
@@ -107,3 +108,16 @@ def test_preflight_is_answered_without_a_key(seeded):
             'Access-Control-Request-Method': 'PUT',
         })
         assert 'access-control-allow-origin' not in other.headers
+
+
+def test_no_ticket_when_the_browser_could_never_use_it(seeded):
+    """Without CORS a browser cannot redeem a ticket, so handing one out only produces
+    an unexplained network error in the upload dialog. Say so instead."""
+    seeded.wander_web_origins = ''
+    app = create_app(seeded, model=ScriptedModel([]), events=FixtureEvents(), search=FixtureSearch())
+    with TestClient(app, headers={'X-API-Key': seeded.wander_api_key}) as client:
+        refused = client.post(ASSET + '/ticket')
+        assert refused.status_code == 503
+        assert 'WANDER_WEB_ORIGINS' in refused.json()['detail']
+        # Uploading with the key still works; only the browser path is off.
+        assert client.put(ASSET, content=b'splat').status_code == 201

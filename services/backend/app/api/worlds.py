@@ -759,6 +759,11 @@ async def upload_ticket(world_id: str, version: str, filename: str, request: Req
     The caller is the web server, which then hands the ticket to the browser so the file
     itself goes straight here instead of through a proxy with a small body limit."""
     store = request.app.state.worlds
+    # Only a browser ever redeems a ticket, and a browser cannot reach us without CORS.
+    # Minting one anyway would hand back a target whose preflight this service rejects,
+    # which surfaces as an unexplained network error in the upload dialog.
+    if not request.app.state.settings.wander_web_origins.strip():
+        raise HTTPException(503, 'Direct browser uploads are off: set WANDER_WEB_ORIGINS to the web app origin')
     store.world(world_id)
     path = store.path('worlds', world_id, version, filename)
     if path.suffix.lower() not in UPLOAD_SUFFIXES:
