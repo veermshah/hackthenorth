@@ -23,7 +23,16 @@ final class HapticController: ObservableObject {
         guard isAvailable else { return }
         do {
             engine = try CHHapticEngine()
+            // Haptics only, so the engine stops sharing the audio session: a voice call switches the
+            // session to .playAndRecord/.voiceChat and deactivates it on hang-up, which would
+            // otherwise stop the buzzes mid-walk on the chest phone.
+            engine?.playsHapticsOnly = true
             engine?.resetHandler = { [weak self] in
+                Task { @MainActor in try? self?.engine?.start() }
+            }
+            // Interruptions and app suspension stop the engine; bring it back so buzzing resumes.
+            engine?.stoppedHandler = { [weak self] reason in
+                guard reason != .engineDestroyed else { return }
                 Task { @MainActor in try? self?.engine?.start() }
             }
             try engine?.start()
@@ -56,7 +65,9 @@ final class HapticController: ObservableObject {
                 guard let self, let pulse = self.currentPulse else { break }
                 self.buzzCount += 1
                 self.lastBuzz = Date()
-                self.play(eventType: .hapticTransient, intensity: pulse.intensity, sharpness: pulse.sharpness, duration: 0)
+                // A full-strength continuous buzz, not a tap: taps are lost in a pocket.
+                self.play(eventType: .hapticContinuous, intensity: pulse.intensity, sharpness: pulse.sharpness,
+                          duration: pulse.duration)
                 try? await Task.sleep(for: .seconds(pulse.interval))
             }
             self?.isPulsing = false
@@ -72,7 +83,7 @@ final class HapticController: ObservableObject {
 
     private func play(eventType: CHHapticEvent.EventType, intensity: Float, sharpness: Float, duration: TimeInterval) {
         guard let engine, isAvailable else {
-            UIImpactFeedbackGenerator(style: intensity > 0.6 ? .heavy : .medium).impactOccurred()
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
             return
         }
         do {

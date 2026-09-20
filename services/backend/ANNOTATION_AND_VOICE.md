@@ -121,6 +121,13 @@ Start the backend normally. Configure the client with the separate demo token,
 never OPENAI_API_KEY. The token is checked before opening the paid upstream socket.
 Keep VOICE_ENABLED=false until you want to test the experimental Live path.
 
+The quickest paid check needs no recording: typed text goes through the same delegation
+path and the reply comes back as speech.
+
+```powershell
+python -m services.backend.scripts.test_voice --say "where am I" --say "guide me to room 101" --log artifacts/voice-events.jsonl
+```
+
 For a recorded-audio smoke test, convert a short recording to mono 24 kHz PCM WAV:
 
 ```powershell
@@ -128,10 +135,12 @@ ffmpeg -i question.m4a -ar 24000 -ac 1 -c:a pcm_s16le artifacts/question.wav
 python -m services.backend.scripts.test_voice --input artifacts/question.wav
 ```
 
-The script creates a new unlocalized session, sends paced audio, prints transcripts
-and the delegated backend response, and saves artifacts/voice-reply.wav. Ask a
-location question first; unknown localization is expected without Niantic poses.
-Use --base-url with the deployed HTTPS URL to test Modal. Live/model access is
-account-dependent. No real call or cloud deployment was performed during development.
+The script creates a new unlocalized session (or attaches to `--session <id>`, e.g. the phone's),
+streams silence plus the recording like a microphone, prints every event with timing, and saves
+artifacts/voice-reply.wav. Ask a location question first; unknown localization is expected without
+poses. Set `VOICE_TRACE=true` on the backend to log each upstream Live event with its timeline fields;
+that log answers the Phase 0 question in docs/VOICE_AGENT_PLAN.md (where transcript fragments land
+relative to `session.delegation.created`). Use --base-url with the deployed HTTPS URL to test Modal.
+Live/model access is account-dependent.
 
-Read shared/contracts/voice.md for message formats and interruption limitations.
+Read shared/contracts/voice.md for message formats and limitations.

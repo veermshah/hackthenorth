@@ -21,14 +21,37 @@ final class PeerLink: NSObject, ObservableObject {
     nonisolated(unsafe) private let session: MCSession
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
+    /// Peers the browser can currently see, so a failed connection can be retried.
+    private var visible: [String: MCPeerID] = [:]
+    private var retryTasks: [String: Task<Void, Never>] = [:]
+    /// Seconds before re-inviting a visible peer whose connection dropped or failed.
+    var reinviteDelay: TimeInterval = 3
     private var rolesByPeer: [String: DeviceRole] = [:]
 
     init(role: DeviceRole) {
         self.role = role
-        peerID = MCPeerID(displayName: "\(role.rawValue)-\(UIDevice.current.name.prefix(20))")
-        session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .none)
+        // Reuse one peer identity per role across launches. A fresh MCPeerID with the
+        // same display name confuses peers that still remember the old one.
+        peerID = Self.persistentPeerID(displayName: "\(role.rawValue)-\(UIDevice.current.name.prefix(20))")
+        // .optional pairs with peers that use any preference; .none is deprecated and
+        // fails the handshake between some iOS versions.
+        session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .optional)
         super.init()
         session.delegate = self
+    }
+
+    private static func persistentPeerID(displayName: String) -> MCPeerID {
+        let key = "peerID." + displayName
+        if let data = UserDefaults.standard.data(forKey: key),
+           let saved = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data),
+           saved.displayName == displayName {
+            return saved
+        }
+        let fresh = MCPeerID(displayName: displayName)
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: fresh, requiringSecureCoding: true) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        return fresh
     }
 
     func start() {
@@ -39,11 +62,13 @@ final class PeerLink: NSObject, ObservableObject {
             browser.delegate = self
             browser.startBrowsingForPeers()
             self.browser = browser
+            print("[peer] \(peerID.displayName) browsing for \(Self.serviceType)")
         } else {
             let advertiser = MCNearbyServiceAdvertiser(peer: peerID, discoveryInfo: ["role": role.rawValue], serviceType: Self.serviceType)
             advertiser.delegate = self
             advertiser.startAdvertisingPeer()
             self.advertiser = advertiser
+            print("[peer] \(peerID.displayName) advertising \(Self.serviceType)")
         }
     }
 
@@ -75,18 +100,36 @@ final class PeerLink: NSObject, ObservableObject {
     }
 
     private func peerChanged(_ name: String, state: MCSessionState) {
+        print("[peer] \(name) -> \(state.rawValue) (0=notConnected 1=connecting 2=connected)")
         switch state {
         case .connected:
+            retryTasks[name]?.cancel()
+            retryTasks[name] = nil
             if let raw = name.split(separator: "-").first, let role = DeviceRole(rawValue: String(raw)) {
                 rolesByPeer[name] = role
             }
             send(.hello(role))
         case .notConnected:
             rolesByPeer[name] = nil
+            scheduleReinvite(name)
         default:
             break
         }
         connectedRoles = session.connectedPeers.compactMap { rolesByPeer[$0.displayName] }.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    /// An invitation can fail when the other phone still holds a session with our
+    /// previous launch; it clears within seconds, so keep inviting while the peer is visible.
+    private func scheduleReinvite(_ name: String) {
+        guard browser != nil, visible[name] != nil else { return }
+        retryTasks[name]?.cancel()
+        retryTasks[name] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(self?.reinviteDelay ?? 3))
+            guard !Task.isCancelled, let self, let browser = self.browser, let peer = self.visible[name],
+                  !self.session.connectedPeers.contains(peer) else { return }
+            print("[peer] re-inviting \(name)")
+            browser.invitePeer(peer, to: self.session, withContext: nil, timeout: 15)
+        }
     }
 
     private func received(_ data: Data, from name: String) {
@@ -116,21 +159,35 @@ extension PeerLink: MCSessionDelegate {
 
 extension PeerLink: MCNearbyServiceAdvertiserDelegate {
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        print("[peer] invitation from \(peerID.displayName), accepting")
         invitationHandler(true, session)
     }
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
         let message = error.localizedDescription
+        print("[peer] advertising failed: \(message)")
         Task { @MainActor in self.lastError = message }
     }
 }
 
 extension PeerLink: MCNearbyServiceBrowserDelegate {
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
+        print("[peer] found \(peerID.displayName) \(info ?? [:]), inviting")
+        nonisolated(unsafe) let peer = peerID  // MCPeerID is not Sendable; it is only stored, never mutated
+        Task { @MainActor in self.visible[peer.displayName] = peer }
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
     }
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        let name = peerID.displayName
+        print("[peer] lost \(name)")
+        Task { @MainActor in
+            self.visible[name] = nil
+            self.retryTasks[name]?.cancel()
+            self.retryTasks[name] = nil
+        }
+    }
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         let message = error.localizedDescription
+        print("[peer] browsing failed: \(message)")
         Task { @MainActor in self.lastError = message }
     }
 }

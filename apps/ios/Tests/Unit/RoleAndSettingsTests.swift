@@ -56,7 +56,8 @@ final class RoleAndSettingsTests: XCTestCase {
         s.sceneDepthEnabled = false
         let config = s.makeARConfiguration()
         XCTAssertTrue(config.frameSemantics.isDisjoint(with: [.sceneDepth, .smoothedSceneDepth]))
-        XCTAssertTrue(config.planeDetection.isEmpty)
+        // Without depth, walls come from vertical plane detection for the structure estimator.
+        XCTAssertEqual(config.planeDetection, [.vertical])
     }
 
     func testTransportSelectionFollowsCredentials() {

@@ -5,15 +5,51 @@ import pytest
 from ..app.services.agent_tools import AgentTools
 from ..app.services.building_agent import BuildingAgentService
 from ..app.services.agent_context import AgentContextBuilder
-from ..app.integrations.openai.agent import OpenAIAgentModel, SYSTEM_PROMPT
+from ..app.integrations.openai.agent import AgentModel, OpenAIAgentModel, SYSTEM_PROMPT
 from ..app.integrations.openai.tools import TOOLS
-from ..scripts.fixtures import ScriptedModel, FixtureSearch, FixtureEvents
+from ..scripts.fixtures import Output, ScriptedModel, FixtureSearch, FixtureEvents
 
 
 def agent_for(navigation, steps):
     model = ScriptedModel(steps)
     tools = AgentTools(navigation, FixtureSearch(), FixtureEvents())
     return BuildingAgentService(navigation.store, model, tools), model
+
+
+class DeltaModel(AgentModel):
+    """Test double for a model that streams real token deltas, unlike ScriptedModel
+    (which only exercises AgentModel.stream()'s no-delta default)."""
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def respond(self, inputs):
+        return SimpleNamespace(output=[], output_text=''.join(self.chunks))
+
+    async def stream(self, inputs):
+        for chunk in self.chunks:
+            yield {'type': 'delta', 'text': chunk}
+        yield {'type': 'response', 'response': await self.respond(inputs)}
+
+
+class ToolThenTextModel(AgentModel):
+    """Regression test double: a real streamed function_call item carries a client-side
+    `parsed_arguments` field (see OpenAIAgentModel.stream()'s docstring-adjacent comment in
+    query_stream) that the API rejects if resubmitted as input on the follow-up turn."""
+    def __init__(self):
+        self.requests = []
+
+    async def respond(self, inputs):
+        raise NotImplementedError
+
+    async def stream(self, inputs):
+        self.requests.append(inputs)
+        if len(self.requests) == 1:
+            call = Output(type='function_call', name='get_current_location', call_id='call-1',
+                         arguments='{}', parsed_arguments={})
+            yield {'type': 'response', 'response': SimpleNamespace(output=[call], output_text='')}
+        else:
+            yield {'type': 'delta', 'text': 'Done.'}
+            yield {'type': 'response', 'response': SimpleNamespace(output=[], output_text='Done.')}
 
 
 @pytest.mark.asyncio
@@ -26,6 +62,47 @@ async def test_location_not_rag(navigation, pose):
     assert result['tool_calls'][0]['result']['data']['nearest_waypoint'] == 'entrance'
     assert 'application_context' in model.requests[0][0]['content']
     assert 'pose' in model.requests[1][0]['content']
+
+
+@pytest.mark.asyncio
+async def test_ui_context_included_only_when_given(navigation):
+    session = navigation.create('demo_building')
+    agent, model = agent_for(navigation, ['Sure.'])
+    await agent.query(session.session_id, 'What is this?', ui_context='Selected note: "Broken handrail" (Stairwell B).')
+    inputs = model.requests[0]
+    assert any('ui_context' in item.get('content', '') and 'Broken handrail' in item.get('content', '')
+               for item in inputs if isinstance(item, dict))
+
+    agent2, model2 = agent_for(navigation, ['Sure.'])
+    await agent2.query(session.session_id, 'What is this?')
+    assert not any('ui_context' in item.get('content', '') for item in model2.requests[0] if isinstance(item, dict))
+
+
+@pytest.mark.asyncio
+async def test_query_stream_forwards_deltas_and_ends_with_a_final_event_matching_query(navigation):
+    session = navigation.create('demo_building')
+    tools = AgentTools(navigation, FixtureSearch(), FixtureEvents())
+    agent = BuildingAgentService(navigation.store, DeltaModel(['Hello', ' there', '.']), tools)
+    events = [event async for event in agent.query_stream(session.session_id, 'Hi')]
+    assert [e for e in events if e['type'] == 'delta'] == [
+        {'type': 'delta', 'text': 'Hello'}, {'type': 'delta', 'text': ' there'}, {'type': 'delta', 'text': '.'}]
+    assert events[-1] == {'type': 'final', 'payload': {'text': 'Hello there.', 'sources': [], 'actions': [], 'tool_calls': []}}
+    # Same session-history side effect as the non-streaming query().
+    assert session.history[-2] == {'role': 'assistant', 'content': 'Hello there.'}
+
+
+@pytest.mark.asyncio
+async def test_query_stream_strips_parsed_arguments_before_the_next_turn(navigation, pose):
+    session = navigation.create('demo_building')
+    navigation.update_pose(session, pose)
+    tools = AgentTools(navigation, FixtureSearch(), FixtureEvents())
+    model = ToolThenTextModel()
+    agent = BuildingAgentService(navigation.store, model, tools)
+    result = [event async for event in agent.query_stream(session.session_id, 'Where am I?')][-1]['payload']
+    assert result['text'] == 'Done.'
+    assert len(model.requests) == 2
+    second_call_items = [item for item in model.requests[1] if isinstance(item, dict) and item.get('type') == 'function_call']
+    assert second_call_items and 'parsed_arguments' not in second_call_items[0]
 
 
 @pytest.mark.asyncio

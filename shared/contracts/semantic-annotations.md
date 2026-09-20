@@ -60,6 +60,29 @@ no longer a required step after publishing. For the legacy flat-graph CLI path
 index the exported graph and restart the backend with GRAPH_PATH set to it, and
 preserve batch/review files for auditing.
 
+## Posed proposals from stored VPS frames (Astra as annotator)
+
+`POST /worlds/{id}/annotations/propose` (body: optional `queryIds`, `limit` 1..50,
+`floor`) runs the annotation model over the newest stored `localize/query` frames
+that localized and kept their pose + FOV. The model returns semantics plus an
+`image_point` (normalised u,v where the feature meets the floor); the backend casts
+a ray from the stored camera pose through that pixel and places the candidate where
+it hits the aligned mesh (`assets.mesh`), else the floor plane. Each candidate keeps
+`frame`/`frame_sha256`, `position`, and `placement` (`method`, `distance_metres`,
+`query_id`, `image_point`, `nearest_node`, `nearest_node_metres`). Rays that hit
+nothing within 15 m leave `position` null and say so in `uncertainty`. The result is
+written to `annotation-proposals.json` (`GET /worlds/{id}/annotations/proposals`) and
+never touches `navigationGraph`; review it with the same `ReviewFile` and publish via
+`PUT /worlds/{id}/annotations`, where an approved candidate with a `position` becomes
+a node at that position and one without is placed at its approach waypoint.
+
+Published, permanent annotations (and nothing noted as a hazard or context-only) are
+then used as spoken landmarks: route instructions gain a `landmarks` array (`at`
+within 3 m of the turn node, `left`/`right` within 2.5 m of the leg) and the
+assistant's `get_current_location` lists nearby reviewed landmarks with a
+heading-relative bearing. Routes, distances and floor changes still come only from
+the graph.
+
 ## Review client requirements
 
 Display candidate evidence images with names/sign text and uncertainty. Allow

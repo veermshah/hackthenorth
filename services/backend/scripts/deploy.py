@@ -50,7 +50,9 @@ def main():
     else:
         print('Could not identify one backend URL. Copy the web endpoint above into WANDER_BACKEND_URL in .env.')
     run('deploy', '-m', 'services.backend.deployment.modal_annotations')
-    print('Both Modal apps deployed. Scan imports can now read configuration from .env.')
+    # No secret needed: pure CV compute, no OpenAI/Elasticsearch/API-key usage.
+    run('deploy', '-m', 'services.backend.deployment.modal_localization')
+    print('All three Modal apps deployed. Scan imports can now read configuration from .env.')
 
 
 if __name__ == '__main__':

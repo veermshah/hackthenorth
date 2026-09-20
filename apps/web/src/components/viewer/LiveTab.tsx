@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import type { ReactNode } from "react";
-import { Icon } from "@/components/Icon";
+import { Icon, type IconName } from "@/components/Icon";
 import {
   formatAge,
   humanError,
@@ -12,7 +12,7 @@ import {
   type LocalizationQuery,
 } from "@/lib/localization";
 import { ConnectPhoneQR, type ConnectPhoneInfo } from "@/components/worlds/ConnectPhoneQR";
-import { formatMetres } from "./SplatViewerEngine";
+import { formatMetres, type FollowMode } from "./SplatViewerEngine";
 import { PHONE_ONLINE_MS, useNow, type FeedState } from "./useLocalizationFeed";
 
 export type LiveTabProps = {
@@ -22,10 +22,10 @@ export type LiveTabProps = {
   /** True while the newest query is auto-selected as it arrives. */
   pinnedToLatest: boolean;
   onSelectQuery: (id: string | null) => void;
-  followPhone: boolean;
-  onFollowPhone: (on: boolean) => void;
+  /** How the camera rides along with the phone. */
+  followMode: FollowMode;
+  onFollowMode: (mode: FollowMode) => void;
   onFocusPhone: () => void;
-  onViewFromPhone: () => void;
   hasSplat: boolean;
   /** QR hand-off for this world; null when the world has no manifest yet. */
   connectInfo: ConnectPhoneInfo | null;
@@ -38,6 +38,13 @@ const TONE_PILL = {
   warn: "bg-pink-tint text-wander-pink",
   bad: "bg-wander-pink text-pure-white",
 } as const;
+
+/** Camera ride-along choices, in the order they read as "further from the phone". */
+const FOLLOW_MODES: { id: FollowMode; label: string; icon: IconName; hint: string }[] = [
+  { id: "off", label: "Free", icon: "pointer", hint: "Move the camera yourself." },
+  { id: "chase", label: "Follow", icon: "walk", hint: "Over the shoulder — watch the phone walk the space." },
+  { id: "firstPerson", label: "From phone", icon: "eye", hint: "Sit in the phone's pose and see what it sees." },
+];
 
 const TONE_DOT = {
   ok: "bg-wander-blue",
@@ -64,8 +71,8 @@ export function LiveTab(p: LiveTabProps) {
           <>
             <p className="mt-3 text-body-sm text-void-black/60">
               Scan this on the front phone (Settings › <strong>Scan world QR</strong>, or the iOS Camera). It picks up
-              the world, its Niantic site and the backend; every frame the SDK sends to VPS then shows up here within a
-              second, drawn on the splat where it was localized.
+              the world and the backend; every frame the SDK sends to VPS then shows up here within a second, drawn on
+              the splat where it was localized.
             </p>
             <div className="mt-4">
               <ConnectPhoneQR info={p.connectInfo} size={200} compact />
@@ -89,6 +96,8 @@ export function LiveTab(p: LiveTabProps) {
   const outcome = queryOutcome(q);
   const imageUrl = queryImageUrl(q);
   const pose = q.result.pose;
+  /** Riding along needs a pose: either this query's, or a recent localized one the marker fell back to. */
+  const canRide = !!pose || queries.some((item) => item.result.pose && querySucceeded(item));
   const aspect = q.image.width && q.image.height ? `${q.image.width} / ${q.image.height}` : "3 / 4";
 
   return (
@@ -114,7 +123,7 @@ export function LiveTab(p: LiveTabProps) {
                 src={imageUrl}
                 alt={`Camera frame the phone sent to VPS at ${new Date(q.capturedAt).toLocaleTimeString()}`}
                 fill
-                sizes="340px"
+                sizes="380px"
                 unoptimized
                 className="object-contain"
               />
@@ -143,29 +152,49 @@ export function LiveTab(p: LiveTabProps) {
           </figcaption>
         </figure>
 
-        {/* Camera actions */}
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <button type="button" className="btn-ghost" disabled={!pose || !p.hasSplat} onClick={p.onFocusPhone}>
+        {/* Camera */}
+        <div className="mt-3">
+          <div
+            role="group"
+            aria-label="Camera"
+            className="grid grid-cols-3 gap-0.5 rounded-xl border border-hairline bg-stellar-white p-1"
+          >
+            {FOLLOW_MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                aria-pressed={p.followMode === m.id}
+                disabled={m.id !== "off" && (!canRide || !p.hasSplat)}
+                title={m.hint}
+                onClick={() => p.onFollowMode(m.id)}
+                className={`inline-flex items-center justify-center gap-1.5 rounded-[9px] px-2 py-1.5 text-body-sm font-medium transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-40 ${
+                  p.followMode === m.id
+                    ? "bg-sky-tint text-wander-blue"
+                    : "text-void-black/60 hover:bg-void-black/5 hover:text-void-black"
+                }`}
+              >
+                <Icon name={m.icon} size={15} />
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 px-1 text-caption text-void-black/50" aria-live="polite">
+            {p.followMode === "off"
+              ? canRide
+                ? "Follow rides along as new fixes land, about once a second."
+                : "Waiting for a localized fix to ride along with."
+              : "Riding along — drag, scroll or press WASD to take the camera back."}
+          </p>
+          <button
+            type="button"
+            className="btn-text mt-1 w-full"
+            disabled={!canRide || !p.hasSplat}
+            onClick={p.onFocusPhone}
+          >
             <Icon name="frame" size={15} />
             Fly to phone
           </button>
-          <button type="button" className="btn-text border border-hairline" disabled={!pose || !p.hasSplat} onClick={p.onViewFromPhone}>
-            <Icon name="eye" size={15} />
-            View from phone
-          </button>
         </div>
-        <label className="mt-2 flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-body-sm text-void-black/80 hover:bg-void-black/5">
-          <span className="flex items-center gap-2">
-            <Icon name="phone" size={15} />
-            Follow the phone as it moves
-          </span>
-          <input
-            type="checkbox"
-            className="size-4 accent-wander-blue"
-            checked={p.followPhone}
-            onChange={(e) => p.onFollowPhone(e.target.checked)}
-          />
-        </label>
       </div>
 
       {/* Details */}

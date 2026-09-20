@@ -15,6 +15,7 @@ import {
   type LocalizationQuery,
 } from "@/lib/localization";
 import {
+  assetUrl,
   EMPTY_GRAPH,
   formatSplatCount,
   type Measurement,
@@ -25,8 +26,10 @@ import {
 } from "@/lib/world-manifest";
 import { STATUS_META, type WorldStatus } from "@/lib/worlds";
 import { InspectorPanel, type PanelTab } from "./InspectorPanel";
-import type { LocalizationMarker, ViewerMode, ViewerSelection, ViewerTool } from "./SplatViewerEngine";
+import { LayerToggle } from "./LayerToggle";
+import type { FollowMode, LocalizationMarker, ViewerMode, ViewerSelection, ViewerTool } from "./SplatViewerEngine";
 import { PHONE_ONLINE_MS, useLocalizationFeed, useNow } from "./useLocalizationFeed";
+import { useMeshTools } from "./useMeshTools";
 import { useSplatViewer, type PickHandler } from "./useSplatViewer";
 import { ViewerOverlay } from "./ViewerOverlays";
 
@@ -59,7 +62,7 @@ const MODES: { id: ViewerMode; label: string; icon: IconName }[] = [
 const TOOLS: { id: ViewerTool; label: string; icon: IconName; key: string }[] = [
   { id: "navigate", label: "Navigate", icon: "pointer", key: "1" },
   { id: "measure", label: "Measure", icon: "ruler", key: "2" },
-  { id: "note", label: "Add note", icon: "pin", key: "3" },
+  { id: "note", label: "Add pin", icon: "pin", key: "3" },
 ];
 
 const AUTOSAVE_MS = 900;
@@ -73,7 +76,7 @@ const isEditing = () => {
 
 /**
  * Full-viewport world editor: the splat canvas fills the page; a floating
- * header, a bottom tool dock and a collapsible inspector sit on top. Notes and
+ * header, a bottom tool dock and a collapsible inspector sit on top. Pins and
  * measurements live here, are pushed into the engine via the hook, and
  * autosave to the world through /api/worlds.
  */
@@ -90,7 +93,17 @@ export function WorldViewer({
   source,
 }: Props) {
   /* ------------------------------------------------------------ edit state */
-  const graph = useMemo<NavigationGraph>(() => manifest?.navigationGraph ?? EMPTY_GRAPH, [manifest]);
+  // A graph written from the Waypoints tab shows immediately; the server copy takes over on the next refresh.
+  const [saved, setSaved] = useState<{ graph: NavigationGraph; over: WorldManifest | null } | null>(null);
+  const graph = useMemo<NavigationGraph>(
+    () => (saved && saved.over === manifest ? saved.graph : manifest?.navigationGraph ?? EMPTY_GRAPH),
+    [saved, manifest],
+  );
+  const setSavedGraph = useCallback((next: NavigationGraph) => setSaved({ graph: next, over: manifest }), [manifest]);
+  const meshTools = useMeshTools(worldId, manifest, graph);
+  const meshUrl = manifest?.assets.mesh ? assetUrl(manifest.assets.mesh) : null;
+  /** What the engine draws: the generated proposal while it is being previewed, else the live graph. */
+  const shownGraph = meshTools.preview && meshTools.proposal ? meshTools.proposal.graph : graph;
   const [notes, setNotes] = useState(initialNotes);
   const [measurements, setMeasurements] = useState(initialMeasurements);
   const [selection, setSelection] = useState<ViewerSelection | null>(null);
@@ -106,6 +119,27 @@ export function WorldViewer({
   const router = useRouter();
 
   const canSave = !!manifest;
+  /**
+   * Write the Niantic Site ID onto the manifest. A world with a site is "aligned"; without one
+   * it is still "processing", matching what the upload dialog does on create. `router.refresh()`
+   * re-reads the manifest so the status pill and the connect QR pick it up.
+   */
+  const saveSiteId = useCallback(
+    async (siteId: string | null) => {
+      const res = await fetch(`/api/worlds/${encodeURIComponent(worldId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nianticSiteId: siteId, status: siteId ? "aligned" : "processing" }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `Could not save the Site ID (${res.status})`);
+      }
+      setNotice({ tone: "ok", text: siteId ? "Site ID saved" : "Site ID cleared" });
+      router.refresh();
+    },
+    [worldId, router],
+  );
   /** What the connect QR encodes; only worlds with a manifest can be handed to a phone. */
   const connectInfo = useMemo<ConnectPhoneInfo | null>(
     () => (manifest ? { worldId, name, nianticSiteId: manifest.nianticSiteId, backendUrl: phoneBackendUrl } : null),
@@ -117,7 +151,8 @@ export function WorldViewer({
   const feed = useLocalizationFeed(worldId, initialLocalizations, !!manifest);
   /** null = pin to the newest query as it arrives; an id = the user is inspecting an older one. */
   const [selectedQueryId, setSelectedQueryId] = useState<string | null>(null);
-  const [followPhone, setFollowPhone] = useState(false);
+  /** null until someone picks a camera by hand (or the engine hands it back); see `followMode`. */
+  const [followChoice, setFollowChoice] = useState<FollowMode | null>(null);
   const latestQuery = feed.queries[0] ?? null;
   const selectedQuery = useMemo(
     () => (selectedQueryId ? feed.queries.find((q) => q.id === selectedQueryId) ?? latestQuery : latestQuery),
@@ -144,6 +179,18 @@ export function WorldViewer({
     };
   }, [selectedQuery, feed.queries]);
 
+  /**
+   * Opening Live while a phone is actually walking drops the camera in behind
+   * it, so the tab lands on the walk in progress rather than on whatever corner
+   * the viewer was last parked in. The moment anyone touches the camera —
+   * a drag, the wheel, WASD, or these buttons — `followChoice` takes over for good.
+   * Freshness comes off the feed's own clock, so this needs no ticking timer.
+   */
+  const phoneOnline =
+    !!latestQuery && !!feed.fetchedAt && feed.fetchedAt - Date.parse(latestQuery.capturedAt) < PHONE_ONLINE_MS;
+  const followMode: FollowMode =
+    followChoice ?? (panelTab === "live" && phoneOnline && splatUrl ? "chase" : "off");
+
   const localizationTrail = useMemo<Vec3[]>(
     () =>
       feed.queries
@@ -169,7 +216,7 @@ export function WorldViewer({
     const id = `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     setNotes((list) => [
       ...list,
-      { id, title: `Note ${list.length + 1}`, position, createdAt: new Date().toISOString() },
+      { id, title: `Pin ${list.length + 1}`, position, createdAt: new Date().toISOString() },
     ]);
     setSelection({ kind: "note", id });
     setPanelOpen(true);
@@ -218,7 +265,7 @@ export function WorldViewer({
       }
       if (e.type === "pick-miss") {
         if (e.tool === "navigate") setSelection(null);
-        else setNotice({ tone: "error", text: "Click on the scan itself — that spot has no splats." });
+        else setNotice({ tone: "error", text: "Click on the scan itself — that spot has no surface." });
         return;
       }
       if (e.tool === "note") addNote(e.point);
@@ -234,15 +281,19 @@ export function WorldViewer({
 
   const { containerRef, state, api, focusViewer } = useSplatViewer({
     splatUrl,
+    meshUrl,
+    meshFrame: manifest?.meshFrame ?? "world",
     alignment: manifest?.alignment,
-    graph,
+    graph: shownGraph,
+    graphFlags: meshTools.flags,
     notes,
     measurements,
     selection,
     pendingPoint,
     localization,
     localizationTrail,
-    followPhone,
+    followMode,
+    onFollowModeChange: setFollowChoice,
     onPick,
   });
 
@@ -250,6 +301,7 @@ export function WorldViewer({
     setPanelOpen(true);
     setPanelTab("live");
   }, []);
+
 
   const pickTool = useCallback(
     (tool: ViewerTool) => {
@@ -360,12 +412,25 @@ export function WorldViewer({
               </button>
             ))}
           </div>
+          {meshUrl && (
+            <LayerToggle
+              layer={state.layer}
+              onLayer={(next) => {
+                api.setLayer(next);
+                focusViewer();
+              }}
+              hasSplat={!!splatUrl}
+              meshReady={state.mesh.status === "ready"}
+              disabled={!interactive}
+              compact
+            />
+          )}
           <div className="flex items-center gap-0.5 rounded-lg border border-hairline bg-pure-white p-0.5">
             {connectInfo && (
               <ToolButton icon="phone" label="Connect a phone (QR code)" onClick={() => setConnectOpen(true)} />
             )}
             <ToolButton icon="frame" label="Reset view" disabled={!interactive} onClick={api.resetView} />
-            {graph.nodes.length > 0 && (
+            {shownGraph.nodes.length > 0 && (
               <ToolButton
                 icon="route"
                 label={state.showGraph ? "Hide waypoints" : "Show waypoints"}
@@ -387,40 +452,59 @@ export function WorldViewer({
       {/* Inspector */}
       {panelOpen && (
         <div className="pointer-events-none absolute inset-x-3 top-16 bottom-20 flex justify-end lg:inset-x-auto lg:right-3">
-          <div className="flex max-h-full w-full lg:w-[340px]">
+          <div className="flex max-h-full w-full lg:w-[380px]">
             <InspectorPanel
               tab={panelTab}
               onTab={setPanelTab}
               onClose={() => setPanelOpen(false)}
+              worldId={worldId}
               live={{
                 feed,
                 selected: selectedQuery,
                 pinnedToLatest: selectedQueryId === null,
                 onSelectQuery: setSelectedQueryId,
-                followPhone,
-                onFollowPhone: setFollowPhone,
-                onFocusPhone: () => {
-                  api.focusPhone();
+                followMode,
+                onFollowMode: (mode: FollowMode) => {
+                  setFollowChoice(mode);
                   focusViewer();
                 },
-                onViewFromPhone: () => {
-                  setFollowPhone(false);
-                  api.viewFromPhone();
+                onFocusPhone: () => {
+                  setFollowChoice("off");
+                  api.focusPhone();
                   focusViewer();
                 },
                 hasSplat: state.status === "ready",
                 connectInfo,
                 onConnectPhone: () => setConnectOpen(true),
               }}
+              waypoints={{
+                manifest,
+                graph,
+                tools: meshTools,
+                selection,
+                onSelect: setSelection,
+                onFocusNode: (id) => {
+                  api.focusNode(id);
+                  focusViewer();
+                },
+                onGraphSaved: (next, text) => {
+                  setSavedGraph(next.navigationGraph ?? EMPTY_GRAPH);
+                  setNotice({ tone: "ok", text });
+                  router.refresh();
+                },
+                onUploadMesh: manifest ? () => setUploadOpen(true) : undefined,
+                source,
+              }}
               name={name}
               status={status}
               manifest={manifest}
               splatUrl={splatUrl}
               numSplats={state.numSplats}
-              graph={graph}
+              graph={shownGraph}
               notes={notes}
               measurements={measurements}
               selection={selection}
+              getCameraPosition={api.getCameraPosition}
               onSelect={setSelection}
               onFocusNode={(id) => {
                 api.focusNode(id);
@@ -432,6 +516,7 @@ export function WorldViewer({
               }}
               onUpdateNote={updateNote}
               onDeleteNote={deleteNote}
+              onNotesDetected={setNotes}
               onStartNote={() => pickTool("note")}
               onStartMeasure={() => pickTool("measure")}
               onLabelMeasurement={(id, label) =>
@@ -440,6 +525,7 @@ export function WorldViewer({
               onDeleteMeasurement={(id) => setMeasurements((list) => list.filter((m) => m.id !== id))}
               onClearMeasurements={() => setMeasurements([])}
               onUploadSplat={manifest ? () => setUploadOpen(true) : undefined}
+              onSaveSiteId={manifest ? saveSiteId : undefined}
             />
           </div>
         </div>
@@ -476,16 +562,17 @@ export function WorldViewer({
 
         <span className="pill hidden bg-pure-white/90 text-void-black/80 md:inline-flex">
           {state.status === "ready" ? `${formatSplatCount(state.numSplats ?? manifest?.stats?.splatCount)} splats` : "—"}
-          {manifest?.alignment && (
-            <>
-              <span aria-hidden="true" className="text-void-black/30">
-                ·
-              </span>
-              {manifest.alignment.frame}
-            </>
-          )}
         </span>
       </div>
+
+      {meshTools.preview && (
+        <div
+          role="status"
+          className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 rounded-lg border border-transparent bg-pink-tint px-3 py-1.5 text-body-sm font-medium text-wander-pink"
+        >
+          Previewing generated waypoints — not saved
+        </div>
+      )}
 
       {notice && (
         <div
@@ -518,8 +605,8 @@ export function WorldViewer({
           mode={{ kind: "existing", manifest }}
           onClose={() => setUploadOpen(false)}
           onDone={() => {
-            setNotice({ tone: "ok", text: "Splat uploaded — reloading the scene" });
-            router.refresh(); // re-reads the manifest; the new splatUrl remounts the engine
+            setNotice({ tone: "ok", text: "Upload saved — reloading the scene" });
+            router.refresh(); // re-reads the manifest; a new splat / mesh path remounts the engine
           }}
         />
       )}
@@ -532,7 +619,7 @@ export function WorldViewer({
 function SaveBadge({ save, canSave, onRetry }: { save: SaveState; canSave: boolean; onRetry: () => void }) {
   if (!canSave)
     return (
-      <span className="pill-sm bg-stellar-white text-void-black/60" title="Add world.json to this world to persist notes">
+      <span className="pill-sm bg-stellar-white text-void-black/60" title="Add world.json to this world to persist pins">
         Not saved · no world.json
       </span>
     );
@@ -611,8 +698,8 @@ const MOVE_HINT = "W A S D move · Q / E height · Arrows turn · Shift hurry";
 
 function hintFor(tool: ViewerTool, mode: ViewerMode, pending: boolean): string {
   if (tool === "measure") return pending ? "Click the second point · Esc cancels" : "Click a point on the scan to start measuring";
-  if (tool === "note") return "Click the scan to pin a note · Esc to finish";
-  return mode === "walk" ? `Drag to look · ${MOVE_HINT}` : `Drag to orbit · Scroll to zoom · ${MOVE_HINT}`;
+  if (tool === "note") return "Click the scan to drop a pin · Esc to finish";
+  return mode === "walk" ? MOVE_HINT : `Drag to orbit · Scroll to zoom · ${MOVE_HINT}`;
 }
 
 /* -------------------------------------------------------------- autosave */

@@ -46,7 +46,13 @@ struct CameraSettingsView: View {
                         Text(String(format: "%.1f m", settingsStore.settings.obstacleRangeMeters))
                             .font(.system(.body, design: .monospaced))
                     }
-                    Toggle("Side phones sense obstacles", isOn: $settingsStore.settings.sidePhonesSenseObstacles)
+                    HStack {
+                        Text("Side buzz range")
+                        Slider(value: $settingsStore.settings.sideBuzzRangeMeters, in: 0.2...2.0, step: 0.1)
+                            .accessibilityIdentifier("settings.sideBuzzRange")
+                        Text(String(format: "%.1f m", settingsStore.settings.sideBuzzRangeMeters))
+                            .font(.system(.body, design: .monospaced))
+                    }
                         .accessibilityIdentifier("settings.sideSensing")
                 } header: {
                     Text("Obstacles")
@@ -117,6 +123,24 @@ struct CameraSettingsView: View {
                 }
 
                 Section {
+                    Toggle("Voice guide", isOn: $settingsStore.settings.voiceAgentEnabled)
+                        .accessibilityIdentifier("settings.voiceAgent")
+                    SecureField("Voice access token", text: $settingsStore.settings.voiceAccessToken)
+                        .accessibilityIdentifier("settings.voiceToken")
+                    Toggle("Start call with the camera", isOn: $settingsStore.settings.voiceAgentAutoStart)
+                        .disabled(!settingsStore.settings.voiceAgentEnabled)
+                        .accessibilityIdentifier("settings.voiceAutoStart")
+                } header: {
+                    Text("Voice guide")
+                } footer: {
+                    Text(settingsStore.settings.canStartVoiceCall
+                         ? "Talk to the guide: ask where you are, what is nearby, or say “guide me to Bed 1”. The voice is AI generated; turn-by-turn cues are spoken by the guide during a call. Needs the backend URL and key above."
+                         : "Needs the backend URL and key above plus the backend's VOICE_ACCESS_TOKEN (not the OpenAI key). The voice is AI generated.")
+                }
+
+                Section {
+                    Toggle("Voice cues", isOn: $settingsStore.settings.voiceCuesEnabled)
+                        .accessibilityIdentifier("settings.voiceCues")
                     Toggle("Upload query images", isOn: $settingsStore.settings.uploadQueryImages)
                         .accessibilityIdentifier("settings.uploadQueries")
                     Toggle("Include failed queries", isOn: $settingsStore.settings.uploadFailedQueries)

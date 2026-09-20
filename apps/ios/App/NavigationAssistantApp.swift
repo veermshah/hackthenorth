@@ -9,6 +9,8 @@ struct NavigationAssistantApp: App {
     @State private var openedChanges: [String] = []
 
     init() {
+        // Line-buffer stdout so `devicectl device process launch --console` shows print() output live.
+        setvbuf(stdout, nil, _IOLBF, 0)
         LaunchArguments.applyOverrides()
     }
 
@@ -76,6 +78,23 @@ enum LaunchArguments {
         if let index = args.firstIndex(of: role), index + 1 < args.count,
            let preset = DeviceRole(rawValue: args[index + 1]) {
             UserDefaults.standard.set(preset.rawValue, forKey: RoleStore.key)
+        }
+        // `-backend <url> -backendKey <key> -world <id>` point a phone at a dev backend without typing.
+        func value(after flag: String) -> String? {
+            guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
+            return args[index + 1]
+        }
+        let backend = value(after: "-backend"), key = value(after: "-backendKey"), world = value(after: "-world")
+        let voiceToken = value(after: "-voiceToken")
+        if backend != nil || key != nil || world != nil || voiceToken != nil {
+            let defaults = UserDefaults.standard
+            var settings = defaults.data(forKey: CameraSettingsStore.key)
+                .flatMap { try? JSONDecoder().decode(CameraSettings.self, from: $0) } ?? .default
+            if let backend { settings.backendURL = backend }
+            if let key { settings.backendAPIKey = key }
+            if let world { settings.worldId = world }
+            if let voiceToken { settings.voiceAccessToken = voiceToken }
+            if let data = try? JSONEncoder().encode(settings) { defaults.set(data, forKey: CameraSettingsStore.key) }
         }
     }
 }

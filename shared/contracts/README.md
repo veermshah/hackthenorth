@@ -23,6 +23,7 @@ worlds/
     ├── world.json           # manifest (schema above) — source of truth for the navigation graph
     ├── notes.json           # notes pinned in the web viewer (optional)
     ├── measurements.json    # web-viewer measurements (optional)
+    ├── navmesh.json         # graph proposal generated from mesh.glb, awaiting review (optional)
     ├── vps-status.json      # last successful phone localization against the site
     ├── localizations/       # VPS image queries mirrored by the phone (newest 50)
     │   ├── index.json       # LocalizationQuery records, newest first
@@ -30,13 +31,13 @@ worlds/
     └── v1/
         ├── scene.spz        # Gaussian splat exported from Scaniverse
         ├── thumbnail.png    # optional 16:10 preview
-        ├── mesh.glb         # optional collision / occlusion mesh
+        ├── mesh.glb         # optional aligned Scaniverse mesh (see `meshFrame`): raycast target, graph checks, graph generation
         └── vps-map.bin      # optional VPS map export for the phone
 sessions/
 └── <sessionId>.json         # navigation session state (a Modal Dict works too)
 ```
 
-`world.json` records the Niantic VPS site id, the active asset `version`, the splat path, the `navigationGraph` used for routing, and the `alignment` that maps splat coordinates into the shared world frame. The web viewer applies `alignment` to the splat and draws the graph on top, so the displayed world is the one the phone localises against. Notes and measurements made in the viewer autosave with `PUT /worlds/{id}/notes` and `PUT /worlds/{id}/measurements`; the graph itself is edited through `PUT /worlds/{id}/graph`.
+`world.json` records the Niantic VPS site id, the active asset `version`, the splat path, the `navigationGraph` used for routing, and the `alignment` that maps splat coordinates into the shared world frame. The web viewer applies `alignment` to the splat and draws the graph on top, so the displayed world is the one the phone localises against. Notes and measurements made in the viewer autosave with `PUT /worlds/{id}/notes` and `PUT /worlds/{id}/measurements`; the graph itself is edited through `PUT /worlds/{id}/graph`. When a world has `assets.mesh`, `POST /worlds/{id}/graph/validate` flags edges through walls and off-floor waypoints and returns a floor-snapped copy, and `POST /worlds/{id}/navmesh` grids the mesh into a proposed graph (`navmesh.json`); neither changes `navigationGraph` — the reviewer accepts with `PUT /graph`.
 
 ## Upload flow (web → backend)
 
@@ -59,7 +60,7 @@ Files stream end-to-end; nothing is held in memory. Note the Next.js proxy must 
 1. **Volume as the DB.** All reads/writes go through the API; nothing else mounts the volume. Writes to `world.json` are read-modify-write with a per-world lock; assets are write-once per version.
 2. **Auth.** Every request carries `X-API-Key` (below).
 3. **Niantic SDK bridge.** The SDK runs on the phone. The backend receives its localization results (`POST /worlds/{id}/localize`), checks the `nianticSiteId` matches the world, re-expresses poses in the world frame, and exposes site status (`GET /worlds/{id}/vps`). If a Lightship API key is configured, it also asks Niantic whether the location is activated. The phone also mirrors every VPS *image query* the SDK issued (`POST /worlds/{id}/localize/query`: the submitted camera frame as JPEG, the SDK's `Vps2LocalizationRequestRecord`, and the camera pose at capture time in the site frame); the backend keeps the newest 50 under `localizations/` and the web viewer polls `GET /worlds/{id}/localizations` to draw the phone on the splat next to the image it sent.
-4. **Routing.** Dijkstra over the graph; turn instructions from leg headings; off-route / arrival detection on every `POST /sessions/{id}/pose`; live `SessionEvent`s over `/ws/sessions/{id}` for the dashboard.
+4. **Routing.** Dijkstra over the graph; turn instructions from leg headings, the first one relative to the traveller's `headingDeg` when given; off-route / arrival detection on every `POST /sessions/{id}/pose`; live `SessionEvent`s over `/ws/sessions/{id}` for the dashboard. Headings are degrees clockwise from above with 0 = -Z, 90 = +X (the yaw of an identity-rotation ARKit camera); every route threshold (snap, leg advance at 1.5 m, off-route at 3 m, arrival) uses horizontal XZ distance because nodes sit on the floor and the phone is at chest height. The `progressUpdate` answer to a pose carries the live heading-relative `instruction` and, when there is something new to say, `speak`. Graph edges carry `kind` (`walk` | `stairs` | `escalator` | `elevator` | `ramp`) and `accessible` (defaults false for stairs / escalators, true otherwise); nodes carry `floor`, and only a non-walk edge may join two floors. A route request or session with `accessibleOnly: true` drops inaccessible edges, so floor changes go by elevator or ramp; a vertical leg produces a `Take the elevator to floor 2.` instruction, and the leg is not advanced until the traveller is at the target storey.
 5. **CPU only.** Rendering happens in the browser.
 
 ## Phone hand-off link (QR code)

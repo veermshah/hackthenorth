@@ -2,6 +2,7 @@ import json
 from ..integrations.openai.tools import REGISTRY
 from ..routing.graph import distance
 from ..routing.astar import astar
+from .destinations import resolve
 from .sessions import broadcast
 
 
@@ -45,6 +46,19 @@ class AgentTools:
             data = [self.mapped(session, d) for d in self.navigation.graph.destinations if d.id in ids]
             data.sort(key=lambda row: row['route_distance_m'] if row['route_distance_m'] is not None else float('inf'))
             sources = [{'type': 'map_entity', 'id': row['id']} for row in data]
+        elif name == 'resolve_destination':
+            # Legacy demo graph: match destination names/aliases; positions come from their waypoints.
+            graph = self.navigation.graph
+            places = [{'id': d.id, 'name': d.name, 'aliases': d.aliases, 'text': d.description, 'source': 'node',
+                       'position': [graph.point(d.waypoint_id).x, graph.point(d.waypoint_id).y, graph.point(d.waypoint_id).z]}
+                      for d in graph.destinations]
+            localized = session.snapshot()['localization']['localized']
+            position = [session.pose.x, session.pose.y, session.pose.z] if localized else None
+            candidates = resolve(places, args.query, position)
+            for row in candidates:
+                row['route_distance_m'] = self.mapped(session, graph.destination(row['id']))['route_distance_m']
+            data = {'evidence_class': 'local_catalogue', 'candidates': candidates}
+            sources = [{'type': 'map_entity', 'id': row['id']} for row in candidates]
         elif name == 'get_current_location':
             state = session.snapshot()
             localized = state['localization']['localized']
@@ -69,6 +83,14 @@ class AgentTools:
             self.events.record(session, 'assistant_action', actions[0])
             if data['instruction'] == 'arrived':
                 self.events.record(session, 'arrived', {'destination_id': args.destination_id})
+        elif name == 'stop_navigation':
+            previous = session.destination_id
+            session.destination_id, session.route, session.route_index = None, [], 0
+            session.instruction, session.distance_remaining_m = None, None
+            data = {'stopped': previous is not None, 'previous_destination': previous}
+            actions = [{'type': 'stop_navigation', 'destination_id': previous}]
+            await broadcast(session, {'type': 'route_update', **session.snapshot()['navigation']})
+            self.events.record(session, 'assistant_action', actions[0])
         elif name == 'get_recent_events':
             data = await self.events.recent(session.site_id, session.session_id, args.event_type, args.minutes)
             sources = [{'type': 'live_event', 'id': row['id']} for row in data]

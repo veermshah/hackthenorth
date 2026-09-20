@@ -39,17 +39,26 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: The chest phone uses the camera and LiDAR to detect obstacles and localize against the mapped building.
+        NSMicrophoneUsageDescription: The voice guide listens to your questions and requests, such as "guide me to Bed 1", during a call.
+        # Keeps a voice call alive if the screen locks; ARKit itself still needs the app in front.
+        UIBackgroundModes: [audio]
         NSLocationWhenInUseUsageDescription: Location helps Niantic localization pick the correct mapped site.
         NSLocalNetworkUsageDescription: The four phones on the wearer talk to each other directly to share obstacle readings and buzz commands.
         NSBonjourServices: [_htn-navaid._tcp, _htn-navaid._udp]
         ITSAppUsesNonExemptEncryption: false
+        # Lets Settings point the backend at a dev machine over plain http on the LAN.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # wander://connect?… links from the web viewer's QR code configure the phone for a world.
         CFBundleURLTypes:
           - CFBundleURLName: com.hackthenorth.navassist.connect
             CFBundleURLSchemes: [wander]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hackthenorth.navassist
+        # BUNDLE_ID_SUFFIX lets a second free team sign a copy for its own phone
+        # (Apple won't share one bundle ID between personal teams): pass e.g. BUNDLE_ID_SUFFIX=.ae to xcodebuild.
+        BUNDLE_ID_SUFFIX: ""
+        PRODUCT_BUNDLE_IDENTIFIER: com.hackthenorth.navassist$(BUNDLE_ID_SUFFIX)
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
   NavigationAssistantTests:
     type: bundle.unit-test

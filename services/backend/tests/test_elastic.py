@@ -39,6 +39,18 @@ async def test_setup_extends_mapping_of_an_existing_index(elastic):
 
 
 @pytest.mark.asyncio
+async def test_setup_skips_an_index_whose_mapping_cannot_be_extended(elastic):
+    from elasticsearch import ApiError
+    elastic.client.indices.exists = AsyncMock(return_value=True)
+    # One index (e.g. live_events, if event_type was ever created as text) rejects an
+    # incompatible field-type change; the others must still get their mapping applied.
+    elastic.client.indices.put_mapping = AsyncMock(side_effect=[
+        ApiError('cannot change field type', SimpleNamespace(status=400), None), None, None])
+    await elastic.setup()
+    assert elastic.client.indices.put_mapping.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_hybrid_filters_rrf_rerank(elastic):
     elastic.settings.elastic_rerank_endpoint = 'jina-rerank'
     result = await ElasticSearch(elastic).search('map_entities', 'site-a', 'bathroom')

@@ -23,8 +23,13 @@ export type NavNode = {
   kind?: NavNodeKind;
   /** Metres, in the frame given by `NavigationGraph.frame`. */
   position: Vec3;
+  /** Storey label, e.g. "1" or "G". Nodes on different floors may only be joined by a non-walk edge. */
   floor?: string;
 };
+
+/** How an edge is traversed; anything but "walk" is a vertical transition with its own instruction. */
+export type NavEdgeKind = "walk" | "stairs" | "escalator" | "elevator" | "ramp";
+export const NAV_EDGE_KINDS: readonly NavEdgeKind[] = ["walk", "stairs", "escalator", "elevator", "ramp"];
 
 export type NavEdge = {
   from: string;
@@ -33,7 +38,16 @@ export type NavEdge = {
   bidirectional?: boolean;
   /** Metres; derived from node positions when omitted. */
   distance?: number;
+  /** Defaults to "walk". */
+  kind?: NavEdgeKind;
+  /** Step-free / wheelchair usable. Defaults to false for stairs and escalators, true otherwise. */
+  accessible?: boolean;
 };
+
+/** Effective accessibility of an edge, applying the kind-based default. */
+export function edgeAccessible(e: NavEdge): boolean {
+  return e.accessible ?? !(e.kind === "stairs" || e.kind === "escalator");
+}
 
 export type NavigationGraph = {
   /** Which frame node positions are expressed in. Defaults to "world". */
@@ -54,7 +68,7 @@ export type Alignment = {
 export type WorldAssets = {
   /** Volume-relative path to the splat (.spz / .ply / .splat / .ksplat / .sog). */
   splat: string;
-  /** Optional collision / occlusion mesh (.glb / .obj). */
+  /** Optional collision / occlusion mesh (.glb); the navmesh builder and viewer raycasts prefer it over the splat. */
   mesh?: string;
   /** Optional VPS map export used by the phone for localization. */
   vpsMap?: string;
@@ -75,6 +89,8 @@ export type WorldManifest = {
   version: string;
   assets: WorldAssets;
   navigationGraph?: NavigationGraph;
+  /** Frame `assets.mesh` is expressed in; "world" (default) = already aligned, "splat" = goes through `alignment`. */
+  meshFrame?: "world" | "splat";
   alignment?: Alignment;
   stats?: { splatCount?: number; captureApp?: string; capturedAt?: string };
   status?: WorldStatus;
@@ -198,6 +214,9 @@ export function validateManifest(input: unknown): string[] {
     for (const k of ["mesh", "vpsMap", "thumbnail"] as const)
       if (m.assets[k] !== undefined && !isStr(m.assets[k])) errs.push(`assets.${k} must be a string`);
 
+  if (m.meshFrame !== undefined && m.meshFrame !== "world" && m.meshFrame !== "splat")
+    errs.push('meshFrame must be "world" or "splat"');
+
   if (m.alignment !== undefined) {
     const a = m.alignment;
     if (
@@ -231,9 +250,22 @@ export function validateGraph(g: unknown, path = "graph"): string[] {
     if (isObj(n) && n.kind !== undefined && !["waypoint", "entrance", "destination"].includes(n.kind as string))
       errs.push(`${path}.nodes[${i}].kind is invalid`);
   });
+  const floors = new Map<string, string | undefined>();
+  g.nodes.forEach((n) => {
+    if (isObj(n) && isStr(n.id)) floors.set(n.id, isStr(n.floor) ? n.floor : undefined);
+  });
   g.edges.forEach((e, i) => {
-    if (!isObj(e) || !isStr(e.from) || !isStr(e.to)) errs.push(`${path}.edges[${i}] needs from and to`);
-    else if (!ids.has(e.from) || !ids.has(e.to)) errs.push(`${path}.edges[${i}] references an unknown node`);
+    if (!isObj(e) || !isStr(e.from) || !isStr(e.to)) {
+      errs.push(`${path}.edges[${i}] needs from and to`);
+      return;
+    }
+    if (!ids.has(e.from) || !ids.has(e.to)) errs.push(`${path}.edges[${i}] references an unknown node`);
+    if (e.kind !== undefined && !NAV_EDGE_KINDS.includes(e.kind as NavEdgeKind)) errs.push(`${path}.edges[${i}].kind is invalid`);
+    if (e.accessible !== undefined && typeof e.accessible !== "boolean") errs.push(`${path}.edges[${i}].accessible must be a boolean`);
+    const a = floors.get(e.from);
+    const b = floors.get(e.to);
+    if (a !== undefined && b !== undefined && a !== b && (e.kind ?? "walk") === "walk")
+      errs.push(`${path}.edges[${i}] joins floors ${a} and ${b}; set kind to stairs, escalator, elevator or ramp`);
   });
   return errs;
 }

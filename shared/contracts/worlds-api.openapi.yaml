@@ -157,11 +157,17 @@ paths:
     put:
       tags: [worlds]
       summary: Replace the navigation graph
+      parameters:
+        - in: header
+          name: If-Match
+          required: false
+          schema: { type: string }
+          description: Proposal sourceRevision; rejects acceptance if the graph, mesh or alignment changed.
       description: |
         Written by the web viewer when stops are tagged. Replaces
         `navigationGraph` wholesale (validate node ids are unique and every
         edge references a node) and bumps `updatedAt`. Routing uses this graph
-        immediately; no cache.
+        immediately; no cache. An optional If-Match header must match the proposal sourceRevision; otherwise returns 412.
       requestBody:
         required: true
         content:
@@ -173,7 +179,93 @@ paths:
           content:
             application/json:
               schema: { $ref: "world.schema.json" }
+        "412":
+          description: The proposal is stale; generate again before accepting
         "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /worlds/{id}/graph/validate:
+    parameters: [{ $ref: "#/components/parameters/worldId" }]
+    post:
+      tags: [worlds]
+      summary: Check a graph against the world's mesh
+      description: |
+        Read-only. Grids `assets.mesh` (see `meshFrame`) and reports edges that
+        cross blocked cells (`edge-through-wall`), edges or nodes off the
+        scanned floor, and nodes whose height is off the floor. Returns a copy
+        of the graph with node heights snapped onto the floor (unless
+        `snap: false`); the editor saves it with `PUT /graph` if accepted.
+        Checks the stored graph when `graph` is omitted.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graph: { $ref: "world.schema.json#/properties/navigationGraph" }
+                snap: { type: boolean, default: true }
+                params: { $ref: "#/components/schemas/NavmeshParams" }
+                frame: { type: string, enum: [world, splat] }
+      responses:
+        "200":
+          description: Issues plus the snapped graph copy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issues, graph, floorY, checkedAt]
+                properties:
+                  issues: { type: array, items: { $ref: "#/components/schemas/GraphIssue" } }
+                  graph: { $ref: "world.schema.json#/properties/navigationGraph" }
+                  floorY: { type: number }
+                  checkedAt: { type: string, format: date-time }
+        "409": { description: World has no mesh asset or generation inputs changed }
+        "422": { description: Bad parameters or no floor found }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /worlds/{id}/navmesh:
+    parameters: [{ $ref: "#/components/parameters/worldId" }]
+    get:
+      tags: [worlds]
+      summary: Last graph proposal generated from the mesh
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NavmeshProposal" }
+        "404": { description: World not found or nothing generated yet }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [worlds]
+      summary: Propose a navigation graph from the mesh
+      description: |
+        Occupancy grid over `assets.mesh` (floor detection, agent-radius
+        erosion, largest connected component) → sparse walking graph. Named places
+        retain their IDs and are connected only through verified free floor. Disconnected
+        places and excluded floor area are reported. Multiple floors, vertical links
+        and restricted paths require a manually authored graph. Deterministic for a
+        given mesh, graph and `params`. Writes
+        `worlds/<id>/navmesh.json` and returns it; `navigationGraph` is NOT
+        touched — a reviewer accepts with `PUT /graph` and `If-Match: sourceRevision`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                params: { $ref: "#/components/schemas/NavmeshParams" }
+                frame: { type: string, enum: [world, splat], description: Overrides the manifest's `meshFrame` }
+      responses:
+        "201":
+          description: Stored proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NavmeshProposal" }
+        "409": { description: World has no mesh asset or generation inputs changed }
+        "422": { description: Bad parameters, no walkable floor, or unsupported multi-floor or restricted graph }
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
@@ -463,6 +555,7 @@ paths:
                 worldId: { type: string }
                 deviceId: { type: string }
                 destination: { type: string, description: "Destination node id." }
+                accessibleOnly: { type: boolean, default: false, description: "Route and reroute without stairs / escalators (edges with `accessible: false`)." }
       responses:
         "201":
           description: Created
@@ -499,7 +592,10 @@ paths:
     put:
       tags: [sessions]
       summary: Set or change the destination
-      description: Recomputes the route from the last known pose and emits a `rerouted` event.
+      description: |
+        Recomputes the route from the last known pose and emits a `rerouted` event. `destination` is a
+        graph node id or `note:<noteId>` for a note pinned in the web viewer (the route ends on the
+        walkable edge beside the note; the arrival cue says where the note is relative to the traveller).
       requestBody:
         required: true
         content:
@@ -509,6 +605,7 @@ paths:
               required: [destination]
               properties:
                 destination: { type: string }
+                accessibleOnly: { type: boolean }
       responses:
         "200":
           description: Updated session with the new route
@@ -517,6 +614,22 @@ paths:
               schema: { $ref: "navigation.schema.json#/$defs/session" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { description: Destination unreachable }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [sessions]
+      summary: Stop guidance
+      description: |
+        Clears the destination and route but keeps the session and its pose stream; state becomes
+        `localizing` (or stays `lost`) and a `progress` event with `speak: "Guidance stopped."` is emitted
+        when guidance was active. Used by the voice assistant's `stop_navigation` tool.
+      responses:
+        "200":
+          description: Updated session without a destination
+          content:
+            application/json:
+              schema: { $ref: "navigation.schema.json#/$defs/session" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Session ended }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /sessions/{sessionId}/pose:
@@ -543,7 +656,7 @@ paths:
             application/json:
               schema: { $ref: "navigation.schema.json#/$defs/progressUpdate" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: Session has no destination yet }
+        "409": { description: Session ended. Poses without a destination are accepted and answer `localizing`, so guidance started server-side (voice assistant) picks up the phone's stream immediately. }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /ws/sessions/{sessionId}:
@@ -609,3 +722,77 @@ components:
                 oneOf:
                   - { type: string }
                   - { type: array, items: { type: object } }
+
+  schemas:
+    NavmeshParams:
+      type: object
+      description: Occupancy-grid settings; all metres except `floorSlopeDeg` and `seed`.
+      properties:
+        cell: { type: number, default: 0.15, minimum: 0.05, maximum: 1 }
+        agentRadius: { type: number, default: 0.3, description: Walkable space is eroded by this }
+        agentHeight: { type: number, default: 1.8, description: Solids between `stepHeight` and this height block a cell }
+        stepHeight: { type: number, default: 0.25 }
+        spacing: { type: number, default: 1.5, description: Waypoint lattice pitch; at least two cells }
+        floorSlopeDeg: { type: number, default: 30 }
+        seed: { type: integer, default: 0 }
+    GraphIssue:
+      type: object
+      required: [kind, message]
+      properties:
+        kind:
+          type: string
+          enum: [node-off-floor, node-edge-of-floor, node-in-obstacle, node-height, node-clearance, edge-through-wall, edge-off-floor, edge-clearance]
+        node: { type: string, description: Node issues }
+        from: { type: string, description: Edge issues }
+        to: { type: string }
+        at: { type: array, items: { type: number }, minItems: 3, maxItems: 3, description: World-frame point mid-way through the offending cells }
+        offsetMetres: { type: number, description: "`node-height` only: signed height above the floor" }
+        message: { type: string }
+    NavmeshProposal:
+      type: object
+      description: "`worlds/<id>/navmesh.json` — a mesh-derived graph awaiting review; never routed against."
+      required: [schema, worldId, mesh, status, params, grid, graph, currentGraphIssues, createdAt]
+      properties:
+        schema: { const: wander.navmesh/v1 }
+        worldId: { type: string }
+        mesh: { type: string, description: Volume path of the mesh that was gridded }
+        status: { const: proposed }
+        params:
+          allOf:
+            - { $ref: "#/components/schemas/NavmeshParams" }
+            - type: object
+              properties: { frame: { type: string, enum: [world, splat] } }
+        grid:
+          type: object
+          description: Top-down occupancy over XZ; `rows[z][x]` is '.' walkable, 'x' blocked or no floor, ' ' no data.
+          required: [origin, cell, width, height, floorY, rows, walkableCells, floorCells]
+          properties:
+            origin: { type: array, items: { type: number }, minItems: 3, maxItems: 3, description: "[x, floorY, z] of the grid corner" }
+            cell: { type: number }
+            width: { type: integer }
+            height: { type: integer }
+            floorY: { type: number }
+            rows: { type: array, items: { type: string } }
+            walkableCells: { type: integer }
+            floorCells: { type: integer }
+            excludedWalkableCells: { type: integer, description: Separate walkable cells outside the main connected floor }
+        graph: { $ref: "world.schema.json#/properties/navigationGraph" }
+        sourceRevision: { type: string, description: Opaque quoted revision for If-Match on acceptance }
+        proposalIssues:
+          type: array
+          items: { $ref: "#/components/schemas/GraphIssue" }
+        places:
+          type: array
+          items:
+            type: object
+            required: [id, name, connected, movedMetres]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              connected: { type: boolean }
+              movedMetres: { type: number }
+        currentGraphIssues:
+          type: array
+          description: The stored `navigationGraph` checked against the same grid
+          items: { $ref: "#/components/schemas/GraphIssue" }
+        createdAt: { type: string, format: date-time }

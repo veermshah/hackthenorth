@@ -17,6 +17,9 @@ the phone does:
 | `Features/Settings` | `CameraSettings`, the one ARKit configuration and capture settings shared by every consumer, plus its form |
 | `Features/Front` | `FrontPipeline` wiring and the front screen |
 | `Features/Connect` | `WorldConnectLink` (`wander://connect` parser) and the QR scanner sheet that configures the phone for a world |
+| `Features/Notes` | `WorldNotesStore` + `NoteGeometry` (notes ranked against the pose), the list sheet and the camera overlay |
+| `Features/Voice` | `VoiceCallController` (one call: socket, mic stream, playback, captions, actions) and the `VoiceCallCard` on the front screen |
+| `Services/Voice` | `VoiceProtocol` (wire messages), `PCM` (frames), `AudioSessionCoordinator`, `VoiceAudioIO` (AVAudioEngine capture/playback), `VoiceWebSocket` |
 | `Features/Haptic` | Side and back phone screen |
 | `Services/AR` | `ARSessionController`, the single ARKit session |
 | `Services/Niantic` | `NianticLocalizer` (NSDK session + VPS2 anchor tracking) and `LocalizationQueryTracker` (pairs the SDK's image queries with the frames it sent) |
@@ -80,6 +83,53 @@ together with the SDK record and the device pose at capture time in the site fra
 Image queries) so the dashboard can show what the phone saw when it did not localize. The
 web viewer polls `GET /worlds/{id}/localizations` and draws the pose as a camera frustum on
 the splat with the query image on its far plane.
+
+### Notes pinned in the web viewer
+
+Notes placed on the scan in the web viewer (`worlds/<id>/notes.json`, contract
+`shared/contracts/notes.schema.json`) are read back on the phone through
+`GET /worlds/{id}/notes`. `WorldNotesStore` fetches them as soon as the world is
+known — loading never waits on localization, so the notes can be read before
+reaching the building — and re-ranks them against the pose about ten times a
+second. `NoteGeometry.bearings` turns each note into a distance, a signed bearing
+(negative left, positive right, flattened onto the horizontal plane so tilting the
+phone does not change "left") and a height delta; the store speaks the nearest one
+when the wearer comes within 5 m and re-arms it only past 8 m, so standing beside a
+note does not repeat it.
+
+Two surfaces show them. **Notes › Open notes** on the front screen lists them
+nearest-first with distance and direction, and works with no fix at all. The
+camera card additionally draws labels over the live feed (`NoteOverlay`),
+projecting each note back through the VPS anchor with `ARCamera.projectPoint`.
+The overlay appears **only while the anchor is `tracked`**: per the NSDK docs a
+`limited` anchor is a coarse GPS estimate, so pinning labels to the world with one
+would place them tens of metres from what they describe. The card's pill says
+which of the two you are getting — "On camera" or "List only".
+
+### Voice guide (GPT-Live through the backend)
+
+With **Settings › Voice guide** on and the backend's `VOICE_ACCESS_TOKEN` entered (or seeded from
+`LocalConfig.plist` as `VoiceAccessToken`), the front screen shows a call card and, by default,
+starts the call together with **Start**. The wearer can ask where they are, what is nearby, or say
+"guide me to Bed 1"; the backend's grounded agent resolves the place (graph nodes and web-viewer
+notes) and starts guidance, and the phone mirrors the resulting `set_destination` /
+`stop_navigation` actions into `LocalizationReporter` so the pose loop and the Navigation card agree.
+
+How it works (`shared/contracts/voice.md`): `VoiceCallController` opens
+`wss://<backend>/ws/sessions/{id}/voice` (`VoiceWebSocket`), authenticates with the token, and on
+`voice_ready` starts `VoiceAudioIO`: an `AVAudioEngine` input tap converted to 24 kHz mono Int16 and
+sent as 100 ms base64 frames, in order, through one sender; returned PCM is scheduled on an
+`AVAudioPlayerNode` only a quarter second ahead so an interruption leaves little stale speech. The
+session is `.playAndRecord` / `.voiceChat` (Apple echo cancellation; Bluetooth HFP allowed), owned by
+`AudioSessionCoordinator` so spoken cues and the call never fight over it. **During a call the phone
+speaks no cues itself**: the backend forwards every turn cue, arrival and off-route phrase into the
+voice, and `SpeechCoordinator` is muted. Obstacle haptics are unaffected.
+
+Poses now stream to `POST /sessions/{id}/pose` whether or not a destination is set, because the
+agent's `set_destination` needs a pose under 15 s old and may start guidance at any moment; a
+session is created up front (`POST /sessions`) when the voice call starts before the first VPS fix.
+The call survives socket drops (three reconnects with backoff, microphone kept running) and Live
+renewals; the typed field on the card sends text through the same path for the simulator.
 
 ### Connecting to a world by QR code
 

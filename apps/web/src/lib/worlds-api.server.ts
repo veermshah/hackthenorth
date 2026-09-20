@@ -32,6 +32,7 @@ import {
   type WorldManifest,
   type WorldNote,
 } from "./world-manifest";
+import type { GraphValidation, NavmeshProposal } from "./navmesh";
 
 /** Error with an HTTP status the route handler can pass through (404, 409, 413, 502…). */
 export class WorldsApiError extends Error {
@@ -47,6 +48,13 @@ export class WorldsApiError extends Error {
 export const SPLAT_EXTENSIONS = new Set([".spz", ".ply", ".splat", ".ksplat", ".sog"]);
 const UPLOAD_EXTENSIONS = new Set([...SPLAT_EXTENSIONS, ".glb", ".png", ".jpg", ".jpeg", ".webp", ".bin"]);
 export const MAX_UPLOAD_BYTES = 2 * 1024 ** 3;
+/** Filenames the backend registers under `assets` when uploaded into the current version. */
+export const MESH_FILENAME = "mesh.glb";
+const CONVENTIONAL_ASSETS: Record<string, "mesh" | "vpsMap" | "thumbnail" | undefined> = {
+  [MESH_FILENAME]: "mesh",
+  "vps-map.bin": "vpsMap",
+  "thumbnail.png": "thumbnail",
+};
 
 /**
  * Data access for worlds stored on the Modal Volume.
@@ -188,12 +196,12 @@ export async function openAsset(segments: string[]): Promise<Response | null> {
 }
 
 /** Replace the world's navigation graph (stops + edges tagged in the viewer). Returns the updated manifest. */
-export async function saveGraph(id: string, graph: NavigationGraph): Promise<WorldManifest | null> {
+export async function saveGraph(id: string, graph: NavigationGraph, sourceRevision?: string | null): Promise<WorldManifest | null> {
   if (!isSafeSegment(id)) return null;
   if (API_URL) {
     const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}/graph`, {
       method: "PUT",
-      headers: { ...apiHeaders(), "content-type": "application/json" },
+      headers: { ...apiHeaders(), "content-type": "application/json", ...(sourceRevision ? { "if-match": sourceRevision } : {}) },
       body: JSON.stringify(graph),
       cache: "no-store",
     });
@@ -206,6 +214,57 @@ export async function saveGraph(id: string, graph: NavigationGraph): Promise<Wor
   const next: WorldManifest = { ...manifest, navigationGraph: graph, updatedAt: new Date().toISOString() };
   await writeFile(join(ASSETS_DIR, "worlds", id, "world.json"), `${JSON.stringify(next, null, 2)}\n`);
   return next;
+}
+
+/* ------------------------------------------------------------------ navmesh */
+
+const MESH_TOOLS_NEED_API = "Mesh tools run in the worlds backend — set WANDER_API_URL to build or validate graphs";
+
+/** The last mesh-derived graph proposal (`worlds/<id>/navmesh.json`), or null when none was built. */
+export async function getNavmesh(id: string): Promise<NavmeshProposal | null> {
+  if (!isSafeSegment(id)) return null;
+  if (API_URL) {
+    const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}/navmesh`, { headers: apiHeaders(), cache: "no-store" });
+    if (res.status === 404) return null;
+    if (!res.ok) throw await apiError(res);
+    return (await res.json()) as NavmeshProposal;
+  }
+  try {
+    return JSON.parse(await readFile(join(ASSETS_DIR, "worlds", id, "navmesh.json"), "utf8")) as NavmeshProposal;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/** Grid the world's mesh and write a *proposed* graph for review; `navigationGraph` is untouched. */
+export async function buildNavmesh(id: string, body: unknown): Promise<NavmeshProposal | null> {
+  if (!isSafeSegment(id)) return null;
+  if (!API_URL) throw new WorldsApiError(501, MESH_TOOLS_NEED_API);
+  const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}/navmesh`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await apiError(res);
+  return (await res.json()) as NavmeshProposal;
+}
+
+/** Edge-through-wall / floor checks (and floor snapping) of a graph against the mesh; read-only. */
+export async function validateGraphAgainstMesh(id: string, body: unknown): Promise<GraphValidation | null> {
+  if (!isSafeSegment(id)) return null;
+  if (!API_URL) throw new WorldsApiError(501, MESH_TOOLS_NEED_API);
+  const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}/graph/validate`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await apiError(res);
+  return (await res.json()) as GraphValidation;
 }
 
 export async function getMeasurements(id: string): Promise<Measurement[]> {
@@ -270,6 +329,33 @@ export async function getNotes(id: string): Promise<WorldNote[]> {
   } catch {
     return [];
   }
+}
+
+const SCENE_DETECTION_NEEDS_API =
+  "Object detection runs in the worlds backend (Astra + stored phone localization frames) — set WANDER_API_URL";
+
+export type AutoDetectNotesResult = NotesFile & { added: number; skippedDuplicates: number; unplaced: number };
+
+/**
+ * Runs the vision annotator over the world's stored, localized VPS query frames (phone
+ * walkthrough images with a recorded pose) and turns every placed finding directly into a
+ * plain note pin — same shape as clicking "Add note" in the viewer, no review gate. Skips
+ * anything within ~0.6 m of an existing note. Backend-only: needs stored phone localization
+ * frames and OpenAI, so this throws 501 in local mode.
+ */
+export async function autoDetectNotes(id: string, opts: { limit?: number; floor?: number } = {}): Promise<AutoDetectNotesResult | null> {
+  if (!isSafeSegment(id)) return null;
+  if (!API_URL) throw new WorldsApiError(501, SCENE_DETECTION_NEEDS_API);
+  const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}/notes/auto-detect`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "content-type": "application/json" },
+    body: JSON.stringify(opts),
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await apiError(res);
+  const parsed = (await res.json()) as NotesFile & { added: number; skippedDuplicates: number; unplaced: number };
+  return { ...parsed, notes: parseNotes(parsed.notes) };
 }
 
 export async function saveNotes(id: string, notes: WorldNote[]): Promise<NotesFile | null> {
@@ -434,13 +520,15 @@ export async function createWorld(input: CreateWorldInput): Promise<WorldManifes
       body: JSON.stringify(body),
       cache: "no-store",
     });
-    if (res.status === 409) throw new WorldsApiError(409, "A world with this id already exists");
+    if (res.status === 409)
+      throw new WorldsApiError(409, "A world with this id already exists — pick another id, or delete it from the dashboard");
     if (!res.ok) throw await apiError(res);
     return parseManifest(await res.json());
   }
 
   const dir = join(ASSETS_DIR, "worlds", input.id);
-  if (existsSync(join(dir, "world.json"))) throw new WorldsApiError(409, "A world with this id already exists");
+  if (existsSync(join(dir, "world.json")))
+    throw new WorldsApiError(409, "A world with this id already exists — pick another id, or delete it from the dashboard");
   const manifest: WorldManifest = {
     schema: WORLD_SCHEMA,
     id: input.id,
@@ -461,7 +549,7 @@ export async function createWorld(input: CreateWorldInput): Promise<WorldManifes
 }
 
 export type WorldPatch = Partial<
-  Pick<WorldManifest, "name" | "space" | "description" | "nianticSiteId" | "version" | "alignment" | "status" | "stats" | "assets">
+  Pick<WorldManifest, "name" | "space" | "description" | "nianticSiteId" | "version" | "alignment" | "status" | "stats" | "assets" | "meshFrame">
 >;
 
 /** Partial manifest update (name, site id, version/assets switch, status…). */
@@ -492,6 +580,91 @@ export async function patchWorld(id: string, patch: WorldPatch): Promise<WorldMa
   });
   await writeFile(join(ASSETS_DIR, "worlds", id, "world.json"), `${JSON.stringify(next, null, 2)}\n`);
   return next;
+}
+
+/**
+ * Delete a world and every version, asset and localization under it. Irreversible:
+ * the volume has no trash. Returns false when the world is already gone, which the
+ * route reports as a 404 rather than pretending to have deleted something.
+ */
+export async function deleteWorld(id: string): Promise<boolean> {
+  if (!isSafeSegment(id)) return false;
+  if (API_URL) {
+    const res = await fetch(`${API_URL}/worlds/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: apiHeaders(),
+      cache: "no-store",
+    });
+    if (res.status === 404) return false;
+    if (!res.ok && res.status !== 204) throw await apiError(res);
+    return true;
+  }
+  // Local mode: only remove a directory that actually holds a world we can read, so a
+  // typo'd id can never take out an unrelated folder under the assets root.
+  if (!(await readLocalManifest(id))) return false;
+  await rm(join(ASSETS_DIR, "worlds", id), { recursive: true, force: true });
+  return true;
+}
+
+/**
+ * Where the browser should send one asset's bytes.
+ *
+ * A splat is far larger than the 4.5 MB request body a Vercel function accepts,
+ * so in production the bytes must not pass through this app at all: the backend
+ * mints a ticket scoped to exactly this path and the browser PUTs straight to
+ * it. Without `WANDER_API_URL` there is no backend and the local dev server
+ * writes the file itself, so the browser keeps using the same-origin route.
+ */
+export type UploadTarget =
+  | { mode: "direct"; url: string; header: string; token: string; expiresAt: number }
+  /**
+   * The bytes come back through this app. `maxBytes` is set only where a platform
+   * caps the request body of a route handler (Vercel: 4.5 MB), so the browser can
+   * refuse a file it knows will be rejected instead of sending it and reading a 413.
+   * `reason` explains why the direct path was unavailable, when we know.
+   */
+  | { mode: "proxy"; maxBytes?: number; reason?: string };
+
+/** Vercel rejects request bodies over this before a route handler ever runs. */
+const VERCEL_BODY_LIMIT = 4.5 * 1024 * 1024;
+
+function proxyTarget(reason?: string): UploadTarget {
+  return process.env.VERCEL ? { mode: "proxy", maxBytes: VERCEL_BODY_LIMIT, reason } : { mode: "proxy", reason };
+}
+
+export async function uploadTarget(segments: string[]): Promise<UploadTarget> {
+  if (segments.length !== 3 || !segments.every(isSafeSegment)) throw new WorldsApiError(400, "Invalid asset path");
+  const file = segments[2];
+  if (!UPLOAD_EXTENSIONS.has(extname(file).toLowerCase()))
+    throw new WorldsApiError(400, `Unsupported file type "${extname(file)}"`);
+  if (!API_URL) return proxyTarget();
+  if (SPLAT_EXTENSIONS.has(extname(file).toLowerCase()) && file !== API_SPLAT_FILENAME)
+    throw new WorldsApiError(400, API_SPZ_ONLY);
+
+  const path = segments.map(encodeURIComponent).join("/");
+  const res = await fetch(`${API_URL}/worlds/${path}/ticket`, {
+    method: "POST",
+    headers: apiHeaders(),
+    cache: "no-store",
+  });
+  if (res.status === 409) throw new WorldsApiError(409, "That version already has this file — upload a new version");
+  // An older backend has no ticket route; fall back to proxying, which still works below 4.5 MB.
+  if (res.status === 404 || res.status === 405) return proxyTarget();
+  // 503 is the backend saying direct uploads are switched off (no WANDER_WEB_ORIGINS).
+  // Proxying is the only route left, so carry its reason through for the error message.
+  if (res.status === 503) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    return proxyTarget(typeof body?.detail === "string" ? body.detail : undefined);
+  }
+  if (!res.ok) throw await apiError(res);
+  const ticket = (await res.json()) as { token: string; expiresAt: number; header: string };
+  return {
+    mode: "direct",
+    url: `${API_URL}/worlds/${path}`,
+    header: ticket.header,
+    token: ticket.token,
+    expiresAt: ticket.expiresAt,
+  };
 }
 
 /**
@@ -532,7 +705,8 @@ export async function uploadAsset(
     return (await res.json()) as { path: string; bytes: number };
   }
 
-  if (!(await readLocalManifest(id))) throw new WorldsApiError(404, "World not found");
+  const manifest = await readLocalManifest(id);
+  if (!manifest) throw new WorldsApiError(404, "World not found");
   const path = join(ASSETS_DIR, "worlds", ...segments);
   if (existsSync(path)) throw new WorldsApiError(409, "That version already has this file — upload a new version");
   await mkdir(dirname(path), { recursive: true });
@@ -543,7 +717,14 @@ export async function uploadAsset(
     throw err;
   }
   const { size } = await stat(path);
-  return { path: `worlds/${segments.join("/")}`, bytes: size };
+  const volume = `worlds/${segments.join("/")}`;
+  // Conventional filenames register themselves, like the backend does on upload.
+  const key = CONVENTIONAL_ASSETS[file];
+  if (key && segments[1] === manifest.version && manifest.assets[key] !== volume) {
+    const next = { ...manifest, assets: { ...manifest.assets, [key]: volume }, updatedAt: new Date().toISOString() };
+    await writeFile(join(ASSETS_DIR, "worlds", id, "world.json"), `${JSON.stringify(next, null, 2)}\n`);
+  }
+  return { path: volume, bytes: size };
 }
 
 /** Turn a failed backend response into an error the UI can show, keeping FastAPI's `detail` text. */

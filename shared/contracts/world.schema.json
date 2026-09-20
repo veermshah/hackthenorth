@@ -61,7 +61,7 @@
               "name": { "type": "string" },
               "kind": { "type": "string", "enum": ["waypoint", "entrance", "destination"], "default": "waypoint" },
               "position": { "$ref": "#/$defs/vec3", "description": "Metres." },
-              "floor": { "type": "string" }
+              "floor": { "type": "string", "description": "Storey label, e.g. \"1\" or \"G\". Nodes on different floors may only be joined by a non-walk edge." }
             }
           }
         },
@@ -75,11 +75,27 @@
               "from": { "type": "string" },
               "to": { "type": "string" },
               "bidirectional": { "type": "boolean", "default": true },
-              "distance": { "type": "number", "minimum": 0, "description": "Metres; derived from positions when omitted." }
+              "distance": { "type": "number", "minimum": 0, "description": "Metres; derived from positions when omitted." },
+              "kind": {
+                "type": "string",
+                "enum": ["walk", "stairs", "escalator", "elevator", "ramp"],
+                "default": "walk",
+                "description": "How the edge is traversed. Anything but 'walk' changes floors (or level) and gets its own instruction."
+              },
+              "accessible": {
+                "type": "boolean",
+                "description": "Usable in a wheelchair / without steps. Defaults to false for stairs and escalators, true otherwise; `accessibleOnly` routes skip false edges."
+              }
             }
           }
         }
       }
+    },
+    "meshFrame": {
+      "type": "string",
+      "enum": ["world", "splat"],
+      "default": "world",
+      "description": "Frame `assets.mesh` vertices are expressed in. 'world' = already aligned (a Scaniverse export registered to the VPS frame); 'splat' = raw splat coordinates, mapped through `alignment` like the splat."
     },
     "alignment": {
       "type": "object",

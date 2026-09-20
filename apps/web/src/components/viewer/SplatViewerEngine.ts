@@ -1,23 +1,38 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
-import type { Alignment, Measurement, NavigationGraph, NavNodeKind, Vec3, WorldNote } from "@/lib/world-manifest";
+import { type Alignment, type Measurement, type NavigationGraph, type NavNodeKind, type Vec3, type WorldNote, edgeAccessible } from "@/lib/world-manifest";
 import { CameraKeyControls } from "./CameraKeyControls";
 
 export type ViewerMode = "orbit" | "walk";
 export type ViewerTool = "navigate" | "measure" | "note";
+/** Which scan the canvas draws: the Gaussian splat or the collision mesh. Never both. */
+export type ViewerLayer = "splat" | "mesh";
 export type LoadStatus = "empty" | "loading" | "ready" | "error";
+export type MeshStatus = "none" | "loading" | "ready" | "error";
+/**
+ * How the camera tracks the phone on the Live tab.
+ * - `off`: free camera.
+ * - `chase`: over-the-shoulder — behind and above the phone, looking the way it looks.
+ * - `firstPerson`: the camera sits in the phone's pose, seeing what it saw.
+ */
+export type FollowMode = "off" | "chase" | "firstPerson";
 
 export type EngineEvent =
   | { type: "status"; status: LoadStatus; error?: string }
   | { type: "progress"; loaded: number; total: number }
   | { type: "loaded"; numSplats: number }
-  /** A click landed on the splat. `point` is in world space, `graphPoint` in the graph's frame. */
-  | { type: "pick"; tool: ViewerTool; point: Vec3; graphPoint: Vec3 }
+  /** The collision mesh (`assets.mesh`) layer changed state; `triangles` on ready. */
+  | { type: "mesh"; status: MeshStatus; triangles?: number; error?: string }
+  /** A click landed on the scan. `point` is in world space, `graphPoint` in the graph's frame; `surface` says what was hit. */
+  | { type: "pick"; tool: ViewerTool; point: Vec3; graphPoint: Vec3; surface: "mesh" | "splat" }
   /** A click landed on a navigation-graph waypoint. */
   | { type: "pick-node"; tool: ViewerTool; id: string }
   /** A click landed on a note pin. */
   | { type: "pick-note"; tool: ViewerTool; id: string }
+  /** The camera stopped following the phone because the viewer took manual control. */
+  | { type: "follow"; mode: FollowMode }
   /** A click hit nothing. */
   | { type: "pick-miss"; tool: ViewerTool };
 
@@ -43,6 +58,10 @@ export type EngineOptions = {
   /** Fills this element with the canvas; it is also the keyboard focus target for walk mode. */
   container: HTMLElement;
   splatUrl: string | null;
+  /** Aligned collision mesh (.glb). Drawn in place of the splat when its layer is picked, and preferred over it for picking. */
+  meshUrl?: string | null;
+  /** Frame the mesh vertices are in: "world" (default) or "splat" (goes through `alignment` like the splat). */
+  meshFrame?: "world" | "splat";
   alignment?: Alignment;
   onEvent: (event: EngineEvent) => void;
 };
@@ -55,26 +74,43 @@ const SKY = 0x60baf4;
 const WHITE = 0xffffff;
 const SLATE = 0x475569;
 
-const NODE_RADIUS = 0.14;
-const EDGE_RADIUS = 0.035;
-const MEASURE_RADIUS = 0.05;
+const NODE_RADIUS = 0.045;
+/** Splat and mesh hits closer together than this describe the same surface; see `intersectScene`. */
+const SURFACE_TIE_M = 0.25;
+
+/** Waypoint click radius in pixels: the dots are drawn small, so they are picked in screen space. */
+const NODE_PICK_PX = 14;
+const MESH_COLOR = 0x94a3b8;
+const MEASURE_RADIUS = 0.03;
 /** Note pins are screen-space: fixed 28 px, coloured by distance instead of shrinking with it. */
 const PIN_SIZE = 28;
 const PIN_NEAR_COLOR = new THREE.Color(PINK);
 const PIN_FAR_COLOR = new THREE.Color(SKY);
 const PIN_NEAR_M = 1.5;
-const MEASURE_LINE_RADIUS = 0.012;
+const MEASURE_LINE_RADIUS = 0.006;
 const EYE_HEIGHT = 1.6;
 /** Walking pace in metres per second; orbit mode scales this with distance to the pivot. */
 const WALK_SPEED = 1.6;
+/**
+ * A press that travels further than this is an orbit/look drag, not a click. There is
+ * deliberately no time limit alongside it: aiming a pin takes as long as it takes, and on a
+ * heavy scan the pointerup itself can arrive late, so a stationary press stays a click
+ * however long it is held.
+ */
 const CLICK_MAX_PX = 5;
-const CLICK_MAX_MS = 400;
 const HOVER_THROTTLE_MS = 70;
 const X_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
 const ORBIT_DIRECTION = new THREE.Vector3(0.65, 0.55, 0.85).normalize();
 const UP = new THREE.Vector3(0, 1, 0);
 /** Distance from the phone to the drawn image plane, and the size of the phone dot. */
 const FRUSTUM_DEPTH = 0.6;
+/** Chase camera: how far behind / above the phone it sits, and how far ahead of it it looks. */
+const CHASE_BACK = 2.6;
+const CHASE_BACK_RANGE: [number, number] = [0.9, 10];
+const CHASE_UP = 1.3;
+const CHASE_AHEAD = 1.2;
+/** Follow easing rate (1/s). Fixes land about once a second, so this glides between them. */
+const FOLLOW_EASE = 3.5;
 const PHONE_RADIUS = 0.06;
 const TRAIL_RADIUS = 0.035;
 /** Portrait phone: the three.js camera's +Y (up) must map to the device's −X (image up). */
@@ -143,7 +179,12 @@ export class SplatViewerEngine {
     entrance: overlayMaterial(SKY),
     destination: overlayMaterial(PINK),
   };
-  private readonly edgeMaterial = overlayMaterial(BLUE);
+  private readonly edgeMaterial = graphLineMaterial(BLUE);
+  private readonly flaggedEdgeMaterial = graphLineMaterial(PINK);
+  /** Vertical transitions: step-free (elevator / ramp) in Sky, stairs / escalators in White. */
+  private readonly accessibleTransitionMaterial = graphLineMaterial(SKY);
+  private readonly steppedTransitionMaterial = graphLineMaterial(WHITE);
+  private readonly flagMaterial = overlayMaterial(PINK);
   private readonly measureMaterial = overlayMaterial(SKY);
   private readonly pendingMaterial = overlayMaterial(WHITE);
   private readonly selectionRing: THREE.Mesh;
@@ -168,13 +209,20 @@ export class SplatViewerEngine {
   private imageTexture: THREE.Texture | null = null;
   private imageTextureUrl: string | null = null;
   private marker: LocalizationMarker | null = null;
-  private followPhone = false;
+  private follow: FollowMode = "off";
+  /** Chase distance, adjustable with the wheel while following. */
+  private chaseBack = CHASE_BACK;
 
   private mesh: SplatMesh | null = null;
-  private nodeMeshes = new Map<string, THREE.Mesh>();
+  private readonly meshGroup = new THREE.Group();
+  private collision: THREE.Object3D | null = null;
+  private readonly collisionMeshes: THREE.Mesh[] = [];
+  private layer: ViewerLayer = "splat";
+  private graphMarkerMeshes = new Map<string, THREE.Mesh>();
   private nodePositions = new Map<string, THREE.Vector3>();
   private notePositions = new Map<string, THREE.Vector3>();
   private selectedNoteId: string | null = null;
+  private selectedNodeId: string | null = null;
   /** Distance (m) at which pins reach the "far" colour; derived from the scene size. */
   private pinFarM = 15;
   private graphFrame: "world" | "splat" = "world";
@@ -183,7 +231,7 @@ export class SplatViewerEngine {
   private mode: ViewerMode = "orbit";
   private tool: ViewerTool = "navigate";
   private pendingPoint: THREE.Vector3 | null = null;
-  private pointerDown: { x: number; y: number; t: number; id: number } | null = null;
+  private pointerDown: { x: number; y: number; id: number } | null = null;
   private lastHover = 0;
   private lastTime = 0;
   private disposed = false;
@@ -211,13 +259,19 @@ export class SplatViewerEngine {
     this.spark = new SparkRenderer({ renderer: this.renderer });
     this.scene.add(this.spark, this.root, this.measureGroup);
     this.applyAlignment(opts.alignment);
+    (opts.meshFrame === "splat" ? this.root : this.scene).add(this.meshGroup);
+    this.meshGroup.visible = false;
+    this.meshGroup.add(new THREE.HemisphereLight(0xffffff, 0x334155, 2.2));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+    sun.position.set(3, 8, 5);
+    this.meshGroup.add(sun);
 
     this.grid = new THREE.GridHelper(20, 20, SLATE, 0x334155);
     this.grid.visible = !opts.splatUrl;
     this.scene.add(this.grid);
 
     this.selectionRing = new THREE.Mesh(
-      new THREE.TorusGeometry(NODE_RADIUS * 1.7, 0.02, 10, 40),
+      new THREE.TorusGeometry(NODE_RADIUS * 2.4, 0.008, 10, 40),
       overlayMaterial(WHITE),
     );
     this.selectionRing.rotation.x = Math.PI / 2;
@@ -274,12 +328,14 @@ export class SplatViewerEngine {
     this.listen(canvas, "pointerup", this.onPointerUp);
     this.listen(canvas, "pointermove", this.onPointerMove);
     this.listen(canvas, "pointerleave", () => this.setHover(null));
+    this.listen(canvas, "wheel", this.onWheel);
 
     if (opts.splatUrl) this.loadSplat(opts.splatUrl);
     else {
       this.frameBox(this.worldBounds());
       opts.onEvent({ type: "status", status: "empty" });
     }
+    if (opts.meshUrl) this.loadMesh(opts.meshUrl);
 
     this.renderer.setAnimationLoop((time) => this.tick(time));
   }
@@ -287,6 +343,11 @@ export class SplatViewerEngine {
   /* ---------------------------------------------------------------- public */
 
   setMode(mode: ViewerMode) {
+    this.releaseFollow(); // picking a camera mode by hand ends the ride-along
+    this.applyMode(mode);
+  }
+
+  private applyMode(mode: ViewerMode) {
     if (mode === this.mode) return;
     this.mode = mode;
     if (mode === "walk") {
@@ -327,8 +388,17 @@ export class SplatViewerEngine {
     for (const l of this.labels) if (l.el.dataset.kind === "node") l.el.hidden = !visible;
   }
 
-  /** Replace the rendered navigation graph. Cheap: graphs are tens of nodes. */
-  setGraph(graph: NavigationGraph) {
+  /** Draw the splat or the collision mesh. The hidden one still catches picks, nearest surface first. */
+  setLayer(layer: ViewerLayer) {
+    this.layer = layer;
+    this.applyLayer();
+  }
+
+  /**
+   * Replace the rendered navigation graph. Cheap: graphs are tens of nodes.
+   * `flags` (node ids and "from|to" edge keys the mesh validator rejected) draw in pink.
+   */
+  setGraph(graph: NavigationGraph, flags?: { nodes: Set<string>; edges: Set<string> }) {
     const frame = graph.frame ?? "world";
     if (frame !== this.graphFrame || !this.graphGroup.parent) {
       this.graphGroup.removeFromParent();
@@ -337,25 +407,39 @@ export class SplatViewerEngine {
     }
     this.clearGroup(this.graphGroup);
     this.removeLabels("node");
-    this.nodeMeshes = new Map();
+    this.graphMarkerMeshes = new Map();
     this.nodePositions = new Map();
 
     for (const node of graph.nodes) {
       const p = new THREE.Vector3(...node.position);
       this.nodePositions.set(node.id, p);
-      const m = new THREE.Mesh(this.sphereGeo, this.nodeMaterials[node.kind ?? "waypoint"]);
+      const m = new THREE.Mesh(
+        this.sphereGeo,
+        flags?.nodes.has(node.id) ? this.flagMaterial : this.nodeMaterials[node.kind ?? "waypoint"],
+      );
       m.scale.setScalar(NODE_RADIUS);
       m.position.copy(p);
       m.renderOrder = 1001;
-      m.userData.nodeId = node.id;
+      m.userData.markerPixels = node.name || node.kind === "destination" || node.kind === "entrance" ? 5 : 3;
       this.graphGroup.add(m);
-      this.nodeMeshes.set(node.id, m);
+      this.graphMarkerMeshes.set(node.id, m);
       this.addLabel("node", node.name ?? node.id, this.graphGroup.localToWorld(p.clone()), NODE_RADIUS * 2.2, node.id);
+      this.labels[this.labels.length - 1].el.dataset.quiet = String(!node.name && (node.kind ?? "waypoint") === "waypoint");
     }
     for (const edge of graph.edges) {
       const a = this.nodePositions.get(edge.from);
       const b = this.nodePositions.get(edge.to);
-      if (a && b) this.graphGroup.add(this.tube(a, b, EDGE_RADIUS, this.edgeMaterial, 1000));
+      if (!a || !b) continue;
+      const flagged = flags?.edges.has(`${edge.from}|${edge.to}`) ?? false;
+      const vertical = (edge.kind ?? "walk") !== "walk";
+      const material = flagged
+        ? this.flaggedEdgeMaterial
+        : vertical
+          ? edgeAccessible(edge) ? this.accessibleTransitionMaterial : this.steppedTransitionMaterial
+          : this.edgeMaterial;
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), material);
+      line.renderOrder = 1000;
+      this.graphGroup.add(line);
     }
     if (this.mesh === null && graph.nodes.length) {
       this.grid.position.y = new THREE.Box3().setFromPoints([...this.nodePositions.values()]).min.y - 0.01;
@@ -364,6 +448,7 @@ export class SplatViewerEngine {
 
   /** Highlight one waypoint or note pin (or nothing). */
   setSelection(sel: ViewerSelection | null) {
+    this.selectedNodeId = sel?.kind === "node" ? sel.id : null;
     let p: THREE.Vector3 | undefined;
     if (sel?.kind === "node" && this.graphGroup.visible) {
       const local = this.nodePositions.get(sel.id);
@@ -388,6 +473,13 @@ export class SplatViewerEngine {
       this.notePositions.set(note.id, p);
       this.addPin(note.id, note.title || "Untitled note", p);
     }
+  }
+
+  /** Where the camera is currently looking from, in the world frame (same frame as notes
+   * and `graph.frame === "world"` nodes) — the web dashboard's current 3D viewport, not a
+   * live phone pose or localization. */
+  getCameraPosition(): Vec3 {
+    return [this.camera.position.x, this.camera.position.y, this.camera.position.z];
   }
 
   private addPin(id: string, title: string, position: THREE.Vector3) {
@@ -503,7 +595,7 @@ export class SplatViewerEngine {
    */
   setLocalization(marker: LocalizationMarker | null) {
     this.marker = marker;
-    this.phoneGroup.visible = !!marker;
+    this.applyPhoneVisibility();
     if (!marker) return;
 
     this.phoneGroup.position.set(...marker.position);
@@ -534,10 +626,7 @@ export class SplatViewerEngine {
     // PlaneGeometry spans local X/Y facing +Z; roll it so local +X → image-right and local +Y → image-up.
     this.imagePlane.quaternion.copy(portrait ? PORTRAIT_ROLL : new THREE.Quaternion());
 
-    const dim = marker.tone === "ok" ? 1 : 0.45;
-    this.frustumMaterial.opacity = 0.95 * dim;
-    (this.phoneDot.material as THREE.MeshBasicMaterial).opacity = 0.95 * dim;
-    this.imagePlane.material.opacity = 0.92 * dim;
+    this.applyMarkerOpacity();
     this.loadImage(marker.imageUrl);
   }
 
@@ -557,10 +646,41 @@ export class SplatViewerEngine {
     }
   }
 
-  /** Keep the orbit pivot glued to the phone as new fixes arrive. */
-  setFollowPhone(on: boolean) {
-    this.followPhone = on;
-    if (on && this.marker) this.focusPhone();
+  /**
+   * Ride along with the phone. `chase` flies the camera behind and above it,
+   * `firstPerson` puts the camera in its pose; both ease onto every new fix, so
+   * the viewer watches the walk instead of chasing it by hand. Dragging, the
+   * wheel or WASD hands control straight back (see `releaseFollow`).
+   */
+  setFollowMode(mode: FollowMode) {
+    if (mode === this.follow) return;
+    this.follow = mode;
+    if (mode !== "off") {
+      this.chaseBack = CHASE_BACK;
+      this.applyMode(mode === "firstPerson" ? "walk" : "orbit");
+    }
+    // OrbitControls and drag-look stay armed throughout: `tick` simply skips
+    // `orbit.update()` while following, so the drag that releases the camera is
+    // the same drag that moves it, with no dead gesture in between.
+    this.applyPhoneVisibility();
+    this.applyMarkerOpacity();
+  }
+
+  /**
+   * The phone and its trail are drawn around the camera in first person, and
+   * both ignore depth, so they smear across the whole view instead of reading
+   * as overlays. Hide them rather than clip through them.
+   */
+  private applyPhoneVisibility() {
+    this.phoneGroup.visible = !!this.marker && this.follow !== "firstPerson";
+    this.trailGroup.visible = this.follow !== "firstPerson";
+  }
+
+  /** Hand the camera back to the viewer and tell React, so the Live tab's toggle agrees. */
+  private releaseFollow() {
+    if (this.follow === "off") return;
+    this.setFollowMode("off");
+    this.opts.onEvent({ type: "follow", mode: "off" });
   }
 
   /** Fly the orbit camera to look at the phone from a few metres away. */
@@ -576,12 +696,17 @@ export class SplatViewerEngine {
    */
   viewFromPhone() {
     if (!this.marker) return;
-    this.followPhone = false;
-    this.setMode("walk");
-    this.camera.position.set(...this.marker.position);
-    this.camera.quaternion.set(...this.marker.rotation).normalize();
-    if (this.marker.orientation === "portrait") this.camera.quaternion.multiply(PORTRAIT_ROLL);
-    this.keys.syncFromCamera();
+    this.setFollowMode("firstPerson");
+  }
+
+  /** Marker opacity: dimmed for a poor fix, and ghosted in chase view so it never blocks the walk. */
+  private applyMarkerOpacity() {
+    if (!this.marker) return;
+    const dim = this.marker.tone === "ok" ? 1 : 0.45;
+    const ghost = this.follow === "chase" ? 0.4 : 1;
+    this.frustumMaterial.opacity = 0.95 * dim;
+    (this.phoneDot.material as THREE.MeshBasicMaterial).opacity = 0.95 * dim;
+    this.imagePlane.material.opacity = 0.92 * dim * ghost;
   }
 
   private loadImage(url: string | null) {
@@ -637,11 +762,13 @@ export class SplatViewerEngine {
     this.orbit.dispose();
     this.keys.dispose();
     this.mesh?.dispose();
+    this.disposeCollision();
     this.spark.dispose();
     this.clearGroup(this.graphGroup);
     this.clearGroup(this.measureGroup);
     this.clearGroup(this.trailGroup);
-    for (const m of [...Object.values(this.nodeMaterials), this.edgeMaterial, this.measureMaterial, this.pendingMaterial, this.trailMaterial])
+    for (const m of [...Object.values(this.nodeMaterials), this.edgeMaterial, this.flaggedEdgeMaterial, this.accessibleTransitionMaterial, this.steppedTransitionMaterial,
+      this.flagMaterial, this.measureMaterial, this.pendingMaterial, this.trailMaterial])
       m.dispose();
     this.imageTexture?.dispose();
     this.imagePlane.geometry.dispose();
@@ -663,28 +790,40 @@ export class SplatViewerEngine {
 
   /* --------------------------------------------------------------- picking */
 
+  /** While following, the wheel dollies the chase seat instead of doing nothing. */
+  private onWheel = (e: WheelEvent) => {
+    if (this.follow === "off") return;
+    if (this.follow === "firstPerson") return this.releaseFollow();
+    e.preventDefault();
+    const [min, max] = CHASE_BACK_RANGE;
+    this.chaseBack = THREE.MathUtils.clamp(this.chaseBack * Math.exp(e.deltaY * 0.001), min, max);
+  };
+
   private onPointerDown = (e: PointerEvent) => {
     // Any click on the scene should make the keyboard controls live.
     this.opts.container.focus({ preventScroll: true });
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    this.pointerDown = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
+    this.pointerDown = { x: e.clientX, y: e.clientY, id: e.pointerId };
   };
 
   private onPointerUp = (e: PointerEvent) => {
     const d = this.pointerDown;
     this.pointerDown = null;
     if (!d || d.id !== e.pointerId) return;
-    const moved = Math.hypot(e.clientX - d.x, e.clientY - d.y);
-    if (moved > CLICK_MAX_PX || performance.now() - d.t > CLICK_MAX_MS) return;
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_MAX_PX) return;
     this.pick(e);
   };
 
   private onPointerMove = (e: PointerEvent) => {
+    const down = this.pointerDown;
+    // A drag means "I'll take it from here"; a click (under CLICK_MAX_PX) still picks.
+    if (down && this.follow !== "off" && Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MAX_PX)
+      this.releaseFollow();
     if (this.tool === "navigate" || this.pointerDown) return;
     const now = performance.now();
     if (now - this.lastHover < HOVER_THROTTLE_MS) return;
     this.lastHover = now;
-    this.setHover(this.intersectSplat(e)?.point ?? null);
+    this.setHover(this.intersectScene(e)?.point ?? null);
   };
 
   private pick(e: PointerEvent) {
@@ -692,17 +831,46 @@ export class SplatViewerEngine {
     this.setRayFromEvent(e);
 
     // Note pins are DOM elements and handle their own clicks; waypoints are picked here.
-    if (this.graphGroup.visible && this.nodeMeshes.size) {
-      const hit = this.raycaster.intersectObjects([...this.nodeMeshes.values()], false)[0];
-      if (hit) return onEvent({ type: "pick-node", tool: this.tool, id: hit.object.userData.nodeId as string });
-    }
+    const node = this.pickNode(e);
+    if (node) return onEvent({ type: "pick-node", tool: this.tool, id: node });
     if (this.tool === "navigate") return;
 
-    const hit = this.intersectSplat();
+    const hit = this.intersectScene();
     if (!hit) return onEvent({ type: "pick-miss", tool: this.tool });
     this.graphGroup.updateMatrixWorld(true);
     const graphPoint = this.graphGroup.worldToLocal(hit.point.clone());
-    onEvent({ type: "pick", tool: this.tool, point: hit.point.toArray() as Vec3, graphPoint: graphPoint.toArray() as Vec3 });
+    onEvent({
+      type: "pick",
+      tool: this.tool,
+      point: hit.point.toArray() as Vec3,
+      graphPoint: graphPoint.toArray() as Vec3,
+      surface: hit.surface,
+    });
+  }
+
+  /**
+   * Nearest waypoint within `NODE_PICK_PX` of the pointer, or null. Screen space
+   * rather than a raycast against the dots: they are drawn small on purpose, and
+   * a fixed pixel target keeps distant waypoints clickable. Like the dots
+   * themselves, this ignores occlusion — a waypoint behind a wall still picks.
+   */
+  private pickNode(e: PointerEvent): string | null {
+    if (!this.graphGroup.visible || !this.nodePositions.size) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.graphGroup.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    let best: { id: string; d2: number } | null = null;
+    for (const [id, local] of this.nodePositions) {
+      v.copy(local);
+      this.graphGroup.localToWorld(v);
+      v.project(this.camera);
+      if (v.z > 1) continue; // behind the camera
+      const dx = rect.left + ((v.x + 1) / 2) * rect.width - e.clientX;
+      const dy = rect.top + ((1 - v.y) / 2) * rect.height - e.clientY;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= NODE_PICK_PX * NODE_PICK_PX && (!best || d2 < best.d2)) best = { id, d2 };
+    }
+    return best?.id ?? null;
   }
 
   private setRayFromEvent(e: PointerEvent) {
@@ -714,9 +882,37 @@ export class SplatViewerEngine {
     this.raycaster.setFromCamera(ndc, this.camera);
   }
 
-  private intersectSplat(e?: PointerEvent): THREE.Intersection | null {
-    if (!this.mesh?.isInitialized) return null;
+  /**
+   * Nearest surface under the pointer, taking the splat and the collision mesh together.
+   * The mesh is the cleaner surface, but a Scaniverse `.glb` is only the wall planes it
+   * managed to reconstruct: preferring it outright dropped the pin on a slab metres behind
+   * (or beside) whatever the click was aimed at, and floors have no mesh at all. So the
+   * first surface the ray reaches wins, and the drawn layer only breaks a near-tie — the
+   * two describe the same wall there, and the mesh gives the tidier point.
+   */
+  private intersectScene(e?: PointerEvent): (THREE.Intersection & { surface: "mesh" | "splat" }) | null {
     if (e) this.setRayFromEvent(e);
+    const mesh = this.intersectCollision();
+    const splat = this.intersectSplat();
+    if (!mesh) return splat ? { ...splat, surface: "splat" } : null;
+    if (!splat) return { ...mesh, surface: "mesh" };
+    const tie = Math.abs(mesh.distance - splat.distance) <= SURFACE_TIE_M;
+    const preferMesh = tie ? this.meshGroup.visible : mesh.distance < splat.distance;
+    return preferMesh ? { ...mesh, surface: "mesh" } : { ...splat, surface: "splat" };
+  }
+
+  /** Nearest hit on the aligned collision mesh, drawn or not. */
+  private intersectCollision(): THREE.Intersection | null {
+    if (!this.collisionMeshes.length) return null;
+    this.meshGroup.updateMatrixWorld(true);
+    const hits: THREE.Intersection[] = [];
+    for (const m of this.collisionMeshes) m.raycast(this.raycaster, hits);
+    hits.sort((a, b) => a.distance - b.distance);
+    return hits[0] ?? null;
+  }
+
+  private intersectSplat(): THREE.Intersection | null {
+    if (!this.mesh?.isInitialized) return null;
     const hits: THREE.Intersection[] = [];
     this.mesh.raycast(this.raycaster, hits);
     hits.sort((a, b) => a.distance - b.distance);
@@ -750,12 +946,15 @@ export class SplatViewerEngine {
     });
     this.mesh = mesh;
     this.root.add(mesh);
+    this.applyLayer();
 
     mesh.initialized
       .then((m) => {
         if (this.disposed) return;
         this.localBounds = robustBounds(m);
-        this.resetView();
+        // Following owns the camera: take the scan's scale, but don't yank the view off the phone.
+        if (this.follow === "off") this.resetView();
+        else this.frameScales(this.worldBounds());
         onEvent({ type: "loaded", numSplats: m.numSplats });
         onEvent({ type: "status", status: "ready" });
       })
@@ -763,6 +962,71 @@ export class SplatViewerEngine {
         if (this.disposed) return;
         onEvent({ type: "status", status: "error", error: describeError(err) });
       });
+  }
+
+  private loadMesh(url: string) {
+    const { onEvent } = this.opts;
+    onEvent({ type: "mesh", status: "loading" });
+    new GLTFLoader().load(
+      url,
+      (gltf) => {
+        if (this.disposed) return;
+        this.disposeCollision();
+        const object = gltf.scene;
+        let triangles = 0;
+        object.traverse((child) => {
+          if (!(child instanceof THREE.Mesh)) return;
+          const geometry = child.geometry as THREE.BufferGeometry;
+          triangles += (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3;
+          // Scaniverse exports are often single-sided and can face either way; picking must work from anywhere.
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          for (const material of materials) {
+            material.side = THREE.DoubleSide;
+            if (material instanceof THREE.MeshStandardMaterial && !material.map) material.color.set(MESH_COLOR);
+          }
+          this.collisionMeshes.push(child);
+        });
+        this.collision = object;
+        this.meshGroup.add(object);
+        this.applyLayer();
+        if (!this.mesh) {
+          this.localBounds = new THREE.Box3().setFromObject(object);
+          this.resetView();
+        }
+        onEvent({ type: "mesh", status: "ready", triangles: Math.round(triangles) });
+      },
+      undefined,
+      (err) => {
+        if (this.disposed) return;
+        onEvent({ type: "mesh", status: "error", error: describeError(err).replace("splat", "mesh") });
+      },
+    );
+  }
+
+  private disposeCollision() {
+    if (!this.collision) return;
+    this.meshGroup.remove(this.collision);
+    for (const m of this.collisionMeshes) {
+      m.geometry.dispose();
+      for (const material of Array.isArray(m.material) ? m.material : [m.material]) {
+        if (material instanceof THREE.MeshStandardMaterial) material.map?.dispose();
+        material.dispose();
+      }
+    }
+    this.collisionMeshes.length = 0;
+    this.collision = null;
+    this.applyLayer();
+  }
+
+  /**
+   * Show exactly one scan. The mesh only draws once it has actually loaded, so
+   * choosing it mid-download leaves the splat up rather than blanking the
+   * canvas; a world with no splat falls back to the mesh for the same reason.
+   */
+  private applyLayer() {
+    const mesh = this.collision !== null && (this.layer === "mesh" || !this.mesh);
+    this.meshGroup.visible = mesh;
+    if (this.mesh) this.mesh.visible = !mesh;
   }
 
   private applyAlignment(a: Alignment | undefined) {
@@ -837,6 +1101,7 @@ export class SplatViewerEngine {
     const v = new THREE.Vector3();
     const tint = new THREE.Color();
     for (const l of this.labels) {
+      if (l.nodeId) l.el.hidden = !this.graphGroup.visible || (l.el.dataset.quiet === "true" && l.nodeId !== this.selectedNodeId);
       if (l.el.hidden) continue;
       v.copy(l.position).addScaledVector(UP, l.offsetY).project(this.camera);
       const visible = v.z > -1 && v.z < 1 && Math.abs(v.x) < 1.2 && Math.abs(v.y) < 1.2;
@@ -857,17 +1122,22 @@ export class SplatViewerEngine {
     }
   }
 
-  private frameBox(bounds: THREE.Box3) {
-    const center = bounds.getCenter(new THREE.Vector3());
+  /** Scale-dependent bits of framing (clip planes, pin fade); returns the framing distance. */
+  private frameScales(bounds: THREE.Box3): number {
     const radius = Math.max(bounds.getSize(new THREE.Vector3()).length() / 2, 0.5);
     const distance = (radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.05;
     // Pins fade to the far colour by the time you're a scene-radius away.
     this.pinFarM = Math.max(8, radius * 1.5);
-
-    this.camera.position.copy(center).addScaledVector(ORBIT_DIRECTION, distance);
     this.camera.near = Math.max(0.02, distance / 1000);
     this.camera.far = Math.max(200, distance * 40);
     this.camera.updateProjectionMatrix();
+    return distance;
+  }
+
+  private frameBox(bounds: THREE.Box3) {
+    const center = bounds.getCenter(new THREE.Vector3());
+    const distance = this.frameScales(bounds);
+    this.camera.position.copy(center).addScaledVector(ORBIT_DIRECTION, distance);
     this.orbit.target.copy(center);
     this.orbit.update();
   }
@@ -877,6 +1147,10 @@ export class SplatViewerEngine {
     if (this.localBounds && this.mesh) {
       this.mesh.updateMatrixWorld(true);
       return this.localBounds.clone().applyMatrix4(this.mesh.matrixWorld);
+    }
+    if (this.localBounds && this.collision) {
+      this.meshGroup.updateMatrixWorld(true);
+      return this.localBounds.clone().applyMatrix4(this.meshGroup.matrixWorld);
     }
     const points = [...this.nodePositions.values()];
     if (points.length) {
@@ -896,25 +1170,70 @@ export class SplatViewerEngine {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Keep close-up waypoints small enough to inspect the floor beneath them. */
+  private updateGraphMarkerSizes() {
+    const focal = this.opts.container.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)));
+    if (!focal) return;
+    this.camera.updateMatrixWorld();
+    const point = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    this.graphGroup.getWorldScale(scale);
+    for (const [id, marker] of this.graphMarkerMeshes) {
+      marker.getWorldPosition(point);
+      point.applyMatrix4(this.camera.matrixWorldInverse);
+      const radius = Math.max(this.camera.near, -point.z) * marker.userData.markerPixels / focal;
+      marker.scale.setScalar(radius / scale.x);
+      if (id === this.selectedNodeId) this.selectionRing.scale.setScalar(radius / NODE_RADIUS * 1.4);
+    }
+  }
+
   private tick(time: number) {
     const dt = this.lastTime ? (time - this.lastTime) / 1000 : 0;
     this.lastTime = time;
-    if (this.keys.hasInput) this.applyMotion(dt);
-    if (this.followPhone && this.marker && this.mode === "orbit") this.glideToPhone(dt);
-    if (this.mode === "orbit") this.orbit.update();
+    if (this.keys.hasInput) {
+      this.releaseFollow(); // a key press is the viewer taking the camera back
+      this.applyMotion(dt);
+    }
+    if (this.follow !== "off" && this.marker) this.updateFollow(dt);
+    else if (this.mode === "orbit") this.orbit.update();
+    this.updateGraphMarkerSizes();
     this.renderer.render(this.scene, this.camera);
     this.updateLabels();
   }
 
-  /** Ease the orbit pivot (and camera, keeping its offset) onto the phone's latest position. */
-  private glideToPhone(dt: number) {
-    const target = this.phoneGroup.position;
-    const delta = target.clone().sub(this.orbit.target);
-    if (delta.lengthSq() < 1e-6) return;
-    const t = 1 - Math.exp(-Math.min(dt, 0.1) * 6);
-    delta.multiplyScalar(t);
-    this.orbit.target.add(delta);
-    this.camera.position.add(delta);
+  /**
+   * Ease the camera onto the pose the current follow mode wants. Exponential
+   * smoothing keeps it frame-rate independent, and because it eases from
+   * wherever the camera already is, switching modes reads as a glide rather
+   * than a cut — including the first one, from across the room.
+   */
+  private updateFollow(dt: number) {
+    const marker = this.marker;
+    if (!marker) return;
+    const t = 1 - Math.exp(-Math.min(dt, 0.1) * FOLLOW_EASE);
+    const phone = this.phoneGroup.position;
+
+    if (this.follow === "firstPerson") {
+      const q = this.phoneGroup.quaternion.clone();
+      if (marker.orientation === "portrait") q.multiply(PORTRAIT_ROLL);
+      this.camera.position.lerp(phone, t);
+      this.camera.quaternion.slerp(q, t);
+      this.keys.syncFromCamera();
+      return;
+    }
+
+    // Chase: sit behind and above, looking just past the phone. The heading is
+    // flattened so pointing the phone at the floor doesn't bury the camera.
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.phoneGroup.quaternion).setY(0);
+    if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+    forward.normalize();
+    const seat = phone
+      .clone()
+      .addScaledVector(forward, -this.chaseBack)
+      .addScaledVector(UP, CHASE_UP);
+    this.camera.position.lerp(seat, t);
+    this.orbit.target.lerp(phone.clone().addScaledVector(forward, CHASE_AHEAD), t);
+    this.camera.lookAt(this.orbit.target);
   }
 
   /** Apply held keys: WASD moves, Q/E (R/F, Space/C) change height, arrows turn, Shift hurries. */
@@ -1033,4 +1352,9 @@ function describeError(err: unknown): string {
   if (/404|not found/i.test(msg)) return "The splat file was not found on the volume.";
   if (/network|fetch|failed to load/i.test(msg)) return "Could not download the splat. Check the worlds API and try again.";
   return msg || "Failed to load the splat.";
+}
+
+/** Pixel-width lines avoid metre-sized tubes obscuring a close-up scan. */
+function graphLineMaterial(color: number) {
+  return new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false });
 }

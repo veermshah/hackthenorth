@@ -10,6 +10,9 @@ class Output(BaseModel):
     name: str | None = None
     call_id: str | None = None
     arguments: str | None = None
+    # Only ever set by streaming test doubles: the real SDK's .responses.stream() adds this
+    # client-side on function_call items, and it must never be resubmitted as input.
+    parsed_arguments: dict | None = None
 
 
 class ScriptedModel(AgentModel):

@@ -66,31 +66,24 @@ struct HapticRoleView: View {
             }
             .card(background: AppTheme.skyWash.opacity(0.35), bordered: false)
 
-            if role == .left || role == .right {
+            if role != .front {
                 VStack(alignment: .leading, spacing: AppTheme.s12) {
                     HStack {
-                        Text("Side LiDAR")
+                        Text("From the map")
                             .font(.system(size: 22, weight: .bold))
                             .tracking(-0.24)
                         Spacer()
-                        PillTag(text: sensingLabel,
-                                fill: pipeline.isSensing ? AppTheme.marigold : AppTheme.skyTint,
+                        PillTag(text: pipeline.link.connectedRoles.contains(.front) ? "Front linked" : "Waiting for front",
+                                fill: pipeline.link.connectedRoles.contains(.front) ? AppTheme.marigold : AppTheme.skyTint,
                                 identifier: "haptic.sensing")
                     }
-                    Text("Reports the nearest obstacle in this phone's view to the front phone.")
+                    Text("This phone has no camera role. It pulses when the front phone's localization puts a scanned wall or annotated hazard on this side, faster the closer it is.")
                         .font(.system(size: 14))
                         .foregroundStyle(AppTheme.graphite)
-                    HStack(spacing: AppTheme.s8) {
-                        SideZone(title: "L", distance: pipeline.zones.left)
-                        SideZone(title: "C", distance: pipeline.zones.center)
-                        SideZone(title: "R", distance: pipeline.zones.right)
-                    }
-                    StatRow(label: "Nearest", value: pipeline.zones.touching ? "touching"
-                            : pipeline.zones.closest.map { String(format: "%.2f m", $0) } ?? "clear",
+                    StatRow(label: "This side", value: pipeline.lastCommand.distance(for: role).map { String(format: "%.2f m", $0) } ?? "clear",
                             identifier: "haptic.nearest")
-                    StatRow(label: "Frames", value: "\(pipeline.arSession.frameCount)")
-                    StatRow(label: "Reports sent", value: "\(pipeline.reportsSent)")
-                    StatRow(label: "Sent to front", value: "\(pipeline.link.messagesSent)")
+                    StatRow(label: "Commands received", value: "\(pipeline.link.messagesReceived)")
+                    StatRow(label: "Pulses", value: "\(pipeline.pulsesReceived)" + (pipeline.pollingBackend ? " · backend fallback on" : ""))
                 }
                 .card()
             }
@@ -148,7 +141,7 @@ struct HapticRoleView: View {
     }
 
     private var sensingLabel: String {
-        if pipeline.isSensing { return pipeline.arSession.depthAvailable ? "Sensing · LiDAR" : "Sensing · no depth" }
+        if pipeline.isSensing { return pipeline.arSession.depthAvailable ? "Sensing · LiDAR" : "Sensing · camera" }
         if !ARSessionController.isSupported { return "No ARKit" }
         if !settingsStore.settings.sidePhonesSenseObstacles { return "Off in settings" }
         switch pipeline.arSession.state {

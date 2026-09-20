@@ -16,12 +16,27 @@ const sourceSerif = Source_Serif_4({
   display: "swap",
 });
 
+/** Absolute origin for social-preview URLs: the production domain in prod, the deployment URL elsewhere. */
+function siteOrigin() {
+  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
+  const host =
+    (process.env.VERCEL_ENV === "production" && process.env.VERCEL_PROJECT_PRODUCTION_URL) ||
+    process.env.VERCEL_URL;
+  return host ? `https://${host}` : "http://localhost:3000";
+}
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteOrigin()),
   title: {
     default: `${BRAND.name} — ${BRAND.tagline}`,
     template: `%s · ${BRAND.name}`,
   },
   description: BRAND.description,
+  openGraph: {
+    type: "website",
+    siteName: BRAND.name,
+    locale: "en_US",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

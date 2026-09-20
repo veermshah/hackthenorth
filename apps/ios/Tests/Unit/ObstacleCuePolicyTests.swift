@@ -4,6 +4,13 @@ import XCTest
 final class ObstacleCuePolicyTests: XCTestCase {
     let policy = ObstacleCuePolicy()
 
+    /// These tests check which mounts buzz and the headline distance; per-side distances are covered in SideHapticTests.
+    private func flags(_ h: HapticCommand) -> HapticCommand {
+        var c = h
+        c.leftDistance = nil; c.rightDistance = nil; c.backDistance = nil; c.sideRange = nil; c.backRange = nil
+        return c
+    }
+
     func testClearSceneProducesNothing() {
         XCTAssertEqual(policy.decide(.empty), .clear)
     }
@@ -14,7 +21,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
         XCTAssertEqual(d.cue?.priority, .obstacle)
         XCTAssertTrue(d.cue!.text.contains("right"))
         XCTAssertEqual(d.openSide, .right)
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: false, right: false, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: false, right: false, distance: 0.5))
     }
 
     func testWallAheadOnlyBuzzesFront() {
@@ -26,12 +33,12 @@ final class ObstacleCuePolicyTests: XCTestCase {
             .right: SideClearance(role: .right, nearest: nil, timestamp: now)
         ]
         let d = policy.decide(zones, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: false, right: false, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: false, right: false, distance: 0.5))
     }
 
     func testWallAheadWithoutSidePhonesOnlyBuzzesFront() {
         let d = policy.decide(ObstacleZones(left: 0.6, center: 0.5, right: 0.6))
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: false, right: false, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: false, right: false, distance: 0.5))
     }
 
     func testFrontAndLeftPhoneBlockedBuzzesFrontAndLeft() {
@@ -42,7 +49,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
             .right: SideClearance(role: .right, nearest: nil, timestamp: now)
         ]
         let d = policy.decide(zones, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: true, right: false, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: true, right: false, distance: 0.5))
         XCTAssertEqual(d.openSide, .right)
     }
 
@@ -51,7 +58,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
         let zones = ObstacleZones(left: 3.0, center: 0.5, right: 3.0)
         let sides: [DeviceRole: SideClearance] = [.right: SideClearance(role: .right, nearest: 0.8, timestamp: now)]
         let d = policy.decide(zones, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: false, right: true, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: false, right: true, distance: 0.5))
         XCTAssertEqual(d.openSide, .left)
     }
 
@@ -60,7 +67,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
         let zones = ObstacleZones(left: 3.0, center: 0.5, right: 3.0)
         let sides: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 0.7, timestamp: now)]
         let d = policy.decide(zones, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: true, right: false, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: true, right: false, distance: 0.5))
     }
 
     func testSidePhoneReadingOverridesFrontGuess() {
@@ -74,7 +81,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
         let d = policy.decide(zones, sides: sides, now: now)
         XCTAssertEqual(d.openSide, .left)
         XCTAssertTrue(d.cue!.text.contains("left"))
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: false, right: true, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: false, right: true, distance: 0.5))
     }
 
     func testStaleSideReadingIsIgnored() {
@@ -96,7 +103,7 @@ final class ObstacleCuePolicyTests: XCTestCase {
         let d = policy.decide(zones, sides: sides, now: now)
         XCTAssertNil(d.openSide)
         XCTAssertTrue(d.cue!.text.contains("Turn around"))
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, left: true, right: true, distance: 0.5))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, left: true, right: true, distance: 0.5))
     }
 
     func testPeerMessagesRoundTrip() throws {
@@ -113,9 +120,9 @@ final class ObstacleCuePolicyTests: XCTestCase {
 
     func testLeftPhoneVeryCloseBuzzesLeftPhoneOnly() {
         let now: TimeInterval = 1000
-        let sides: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 0.4, timestamp: now)]
+        let sides: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 0.15, timestamp: now)]
         let d = policy.decide(.empty, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(left: true, distance: 0.4))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(left: true, distance: 0.15))
         XCTAssertTrue(d.haptics.shouldBuzz(.left))
         XCTAssertFalse(d.haptics.shouldBuzz(.right))
         XCTAssertFalse(d.haptics.shouldBuzz(.front))
@@ -125,24 +132,29 @@ final class ObstacleCuePolicyTests: XCTestCase {
 
     func testRightPhoneVeryCloseBuzzesRightPhoneOnly() {
         let now: TimeInterval = 1000
-        let sides: [DeviceRole: SideClearance] = [.right: SideClearance(role: .right, nearest: 0.4, timestamp: now)]
+        let sides: [DeviceRole: SideClearance] = [.right: SideClearance(role: .right, nearest: 0.15, timestamp: now)]
         let d = policy.decide(.empty, sides: sides, now: now)
-        XCTAssertEqual(d.haptics, HapticCommand(right: true, distance: 0.4))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(right: true, distance: 0.15))
     }
 
     func testFrontEdgeZoneVeryCloseBuzzesFrontNotSides() {
-        let d = policy.decide(ObstacleZones(left: 0.4, center: nil, right: nil))
-        XCTAssertEqual(d.haptics, HapticCommand(front: true, distance: 0.4))
+        let d = policy.decide(ObstacleZones(left: 0.15, center: nil, right: nil))
+        XCTAssertEqual(flags(d.haptics), HapticCommand(front: true, distance: 0.15))
         XCTAssertEqual(d.cue?.text, "Obstacle close on your left. Move right.")
     }
 
     func testFarObstaclesAreIgnored() {
         let d = policy.decide(ObstacleZones(left: 2.0, center: 3.0, right: 2.5))
         XCTAssertEqual(d, .clear)
-        // A side phone at 0.8 m alone is not "way too close" yet.
+        // A side phone at 0.35 m alone is not "very close": no cue, but that phone pulses.
         let now: TimeInterval = 1000
-        let sides: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 0.8, timestamp: now)]
-        XCTAssertEqual(policy.decide(.empty, sides: sides, now: now), .clear)
+        let sides: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 0.35, timestamp: now)]
+        let near = policy.decide(.empty, sides: sides, now: now)
+        XCTAssertNil(near.cue)
+        XCTAssertTrue(near.haptics.left && !near.haptics.front && !near.haptics.right)
+        // Beyond the warning range nothing happens at all.
+        let far: [DeviceRole: SideClearance] = [.left: SideClearance(role: .left, nearest: 1.4, timestamp: now)]
+        XCTAssertEqual(policy.decide(.empty, sides: far, now: now), .clear)
     }
 
     func testObstacleOutranksRoute() {

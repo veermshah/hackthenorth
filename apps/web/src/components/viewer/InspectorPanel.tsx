@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { Icon } from "@/components/Icon";
+import { AssistantPanel } from "./AssistantPanel";
 import {
   formatSplatCount,
   graphLengthMetres,
@@ -9,15 +10,17 @@ import {
   type Measurement,
   type NavigationGraph,
   type NavNodeKind,
+  type Vec3,
   type WorldManifest,
   type WorldNote,
 } from "@/lib/world-manifest";
 import { STATUS_META, type WorldStatus } from "@/lib/worlds";
 import { LiveTab, type LiveTabProps } from "./LiveTab";
+import { WaypointsTab, type WaypointsTabProps } from "./WaypointsTab";
 import { formatMetres, type ViewerSelection } from "./SplatViewerEngine";
 import { PHONE_ONLINE_MS, useNow } from "./useLocalizationFeed";
 
-export type PanelTab = "live" | "notes" | "measure" | "details";
+export type PanelTab = "live" | "ask" | "notes" | "measure" | "waypoints" | "details";
 
 export const NODE_TONE: Record<NavNodeKind, string> = {
   waypoint: "bg-wander-blue",
@@ -27,8 +30,10 @@ export const NODE_TONE: Record<NavNodeKind, string> = {
 
 const TABS: { id: PanelTab; label: string }[] = [
   { id: "live", label: "Live" },
-  { id: "notes", label: "Notes" },
+  { id: "ask", label: "Ask" },
+  { id: "notes", label: "Pins" },
   { id: "measure", label: "Measure" },
+  { id: "waypoints", label: "Waypoints" },
   { id: "details", label: "Details" },
 ];
 
@@ -36,8 +41,11 @@ type Props = {
   tab: PanelTab;
   onTab: (t: PanelTab) => void;
   onClose: () => void;
+  worldId: string;
   /** Phone localization feed shown in the Live tab. */
   live: LiveTabProps;
+  /** Graph validator and generated-graph review shown in the Waypoints tab. */
+  waypoints: WaypointsTabProps;
   name: string;
   status: WorldStatus;
   manifest: WorldManifest | null;
@@ -47,11 +55,15 @@ type Props = {
   notes: WorldNote[];
   measurements: Measurement[];
   selection: ViewerSelection | null;
+  /** Current camera position (world frame), for the Ask tab's "what's in view" context. */
+  getCameraPosition: () => Vec3 | null;
   onSelect: (sel: ViewerSelection | null) => void;
   onFocusNode: (id: string) => void;
   onFocusNote: (id: string) => void;
   onUpdateNote: (id: string, patch: Partial<Pick<WorldNote, "title" | "location" | "description">>) => void;
   onDeleteNote: (id: string) => void;
+  /** Replaces the pin list after POST /api/worlds/:id/notes/auto-detect adds new pins. */
+  onNotesDetected: (notes: WorldNote[]) => void;
   onStartNote: () => void;
   onStartMeasure: () => void;
   onLabelMeasurement: (id: string, label: string) => void;
@@ -59,9 +71,11 @@ type Props = {
   onClearMeasurements: () => void;
   /** Opens the upload dialog for a new splat version (only when the world has a manifest). */
   onUploadSplat?: () => void;
+  /** Saves the Niantic Site ID from the Details tab; resolves once the manifest is written. */
+  onSaveSiteId?: (siteId: string | null) => Promise<void>;
 };
 
-/** Right-hand panel: write notes, review measurements, read the manifest and waypoints. */
+/** Right-hand panel: write pins, review measurements, read the manifest and waypoints. */
 export function InspectorPanel(p: Props) {
   const now = useNow(5000);
   return (
@@ -70,7 +84,11 @@ export function InspectorPanel(p: Props) {
       className="card pointer-events-auto flex max-h-full flex-col overflow-hidden p-0"
     >
       <div className="flex items-center gap-1 border-b border-hairline p-2">
-        <div role="tablist" aria-label="Inspector" className="flex flex-1 items-center gap-0.5">
+        <div
+          role="tablist"
+          aria-label="Inspector"
+          className="scrollbar-none flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto"
+        >
           {TABS.map((t) => {
             const count = t.id === "notes" ? p.notes.length : t.id === "measure" ? p.measurements.length : 0;
             const latest = t.id === "live" ? p.live.feed.queries[0] : undefined;
@@ -82,7 +100,7 @@ export function InspectorPanel(p: Props) {
                 type="button"
                 aria-selected={p.tab === t.id}
                 onClick={() => p.onTab(t.id)}
-                className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-body-sm font-medium transition-colors duration-200 ${
+                className={`inline-flex shrink-0 items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-body-sm font-medium whitespace-nowrap transition-colors duration-200 ${
                   p.tab === t.id ? "bg-sky-tint text-wander-blue" : "text-void-black/60 hover:text-void-black"
                 }`}
               >
@@ -98,15 +116,27 @@ export function InspectorPanel(p: Props) {
             );
           })}
         </div>
-        <button type="button" className="btn-icon size-7" aria-label="Close panel" onClick={p.onClose}>
+        <button type="button" className="btn-icon size-7 shrink-0" aria-label="Close panel" onClick={p.onClose}>
           <Icon name="x" size={15} />
         </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {p.tab === "live" && <LiveTab {...p.live} />}
+        {p.tab === "ask" && (
+          <AssistantPanel
+            worldId={p.worldId}
+            name={p.name}
+            status={p.status}
+            graph={p.graph}
+            notes={p.notes}
+            selection={p.selection}
+            getCameraPosition={p.getCameraPosition}
+          />
+        )}
         {p.tab === "notes" && <NotesTab {...p} />}
         {p.tab === "measure" && <MeasureTab {...p} />}
+        {p.tab === "waypoints" && <WaypointsTab {...p.waypoints} />}
         {p.tab === "details" && <DetailsTab {...p} />}
       </div>
     </aside>
@@ -117,17 +147,55 @@ export function InspectorPanel(p: Props) {
 
 function NotesTab(p: Props) {
   const selectedId = p.selection?.kind === "note" ? p.selection.id : null;
+  const [detecting, setDetecting] = useState(false);
+  const [detectMessage, setDetectMessage] = useState<string | null>(null);
+
+  async function detectObjects() {
+    setDetecting(true);
+    setDetectMessage(null);
+    try {
+      const res = await fetch(`/api/worlds/${encodeURIComponent(p.worldId)}/notes/auto-detect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = (await res.json()) as {
+        notes?: WorldNote[];
+        added?: number;
+        skippedDuplicates?: number;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(body.error ?? "Could not detect objects");
+      p.onNotesDetected(body.notes ?? []);
+      const added = body.added ?? 0;
+      setDetectMessage(
+        added === 0
+          ? "No new objects found — try scanning more of the room with the phone first."
+          : `Added ${added} pin${added === 1 ? "" : "s"}${body.skippedDuplicates ? ` (skipped ${body.skippedDuplicates} already-known)` : ""}.`,
+      );
+    } catch (err) {
+      setDetectMessage(err instanceof Error ? err.message : "Could not detect objects");
+    } finally {
+      setDetecting(false);
+    }
+  }
+
   return (
     <div className="p-3">
       <button type="button" className="btn-ghost w-full" onClick={p.onStartNote}>
         <Icon name="pin" size={15} />
-        Add a note on the scan
+        Add a pin on the scan
       </button>
+      <button type="button" className="btn-ghost mt-1.5 w-full" onClick={detectObjects} disabled={detecting}>
+        <Icon name="sparkle" size={15} />
+        {detecting ? "Detecting objects…" : "Detect objects automatically"}
+      </button>
+      {detectMessage && <p className="mt-1.5 px-1 text-caption text-void-black/60">{detectMessage}</p>}
 
       {p.notes.length === 0 ? (
         <p className="mt-4 px-1 text-body-sm text-void-black/50">
-          No notes yet. Pick the tool (or press <kbd className="rounded-sm border border-hairline px-1">3</kbd>) and
-          click the scan where you want to pin a title, location and description. Notes save to the world
+          No pins yet. Pick the tool (or press <kbd className="rounded-sm border border-hairline px-1">3</kbd>) and
+          click the scan where you want to drop a title, location and description. Pins save to the world
           automatically.
         </p>
       ) : (
@@ -149,7 +217,7 @@ function NotesTab(p: Props) {
                   <span aria-hidden="true" className="mt-1.5 inline-block size-2.5 shrink-0 rounded-full bg-wander-pink" />
                   <span className="min-w-0 flex-1">
                     <span className={`block truncate text-body-sm ${isSel ? "font-medium text-wander-blue" : "text-void-black/80"}`}>
-                      {n.title || "Untitled note"}
+                      {n.title || "Untitled pin"}
                     </span>
                     {(n.location || n.description) && !isSel && (
                       <span className="block truncate text-caption text-void-black/50">
@@ -195,7 +263,7 @@ function NoteEditor({
 
   const commit = () =>
     onChange({
-      title: title.trim() || "Untitled note",
+      title: title.trim() || "Untitled pin",
       location: location.trim() || undefined,
       description: description.trim() || undefined,
     });
@@ -343,9 +411,11 @@ function DetailsTab({
   onSelect,
   onFocusNode,
   onUploadSplat,
+  onSaveSiteId,
 }: Props) {
   const meta = STATUS_META[status];
   const splatFile = manifest?.assets.splat.split("/").pop();
+  const meshFile = manifest?.assets.mesh?.split("/").pop();
   const selectedNode = selection?.kind === "node" ? selection.id : null;
   return (
     <div>
@@ -355,9 +425,6 @@ function DetailsTab({
         {manifest?.description && <p className="mt-1 text-body-sm text-slate">{manifest.description}</p>}
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 border-b border-hairline p-4 text-body-sm">
-        <Row label="Niantic site">
-          {manifest?.nianticSiteId ?? <span className="text-void-black/40">Not published</span>}
-        </Row>
         <Row label="Version">{manifest?.version ?? "—"}</Row>
         <Row label="Splat">
           {splatFile ? (
@@ -369,8 +436,24 @@ function DetailsTab({
           )}
         </Row>
         <Row label="Splats">{formatSplatCount(numSplats ?? manifest?.stats?.splatCount)}</Row>
+        <Row label="Mesh">
+          {meshFile ? (
+            <span title={manifest?.assets.mesh} className="break-all">
+              {meshFile}
+            </span>
+          ) : (
+            <span className="text-void-black/40">None</span>
+          )}
+        </Row>
         <Row label="Frame">
           {manifest?.alignment?.frame ?? <span className="text-void-black/40">Unaligned</span>}
+        </Row>
+        <Row label="Site ID">
+          {manifest && onSaveSiteId ? (
+            <SiteIdField key={manifest.nianticSiteId ?? ""} value={manifest.nianticSiteId} onSave={onSaveSiteId} />
+          ) : (
+            manifest?.nianticSiteId ?? <span className="text-void-black/40">Not set</span>
+          )}
         </Row>
         {manifest?.stats?.captureApp && <Row label="Captured with">{manifest.stats.captureApp}</Row>}
         {manifest?.updatedAt && <Row label="Updated">{new Date(manifest.updatedAt).toLocaleString()}</Row>}
@@ -434,6 +517,73 @@ function DetailsTab({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The Niantic Scaniverse Site the phone localizes against. It is what ties this world to a
+ * real building, so a world without one stays "processing" and the connect QR carries no site.
+ */
+function SiteIdField({
+  value,
+  onSave,
+}: {
+  value: string | null;
+  onSave: (siteId: string | null) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(value ?? "");
+  const [state, setState] = useState<"idle" | "saving" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const trimmed = draft.trim();
+  const changed = trimmed !== (value ?? "");
+
+  const commit = async () => {
+    if (!changed || state === "saving") return;
+    setState("saving");
+    setError(null);
+    try {
+      await onSave(trimmed || null);
+      setState("idle");
+    } catch (err) {
+      setState("error");
+      setError(err instanceof Error ? err.message : "Could not save the Site ID");
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <input
+          id="world-site-id"
+          className="input min-w-0 flex-1 py-1 font-mono text-body-sm"
+          value={draft}
+          placeholder="Not set"
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Niantic Site ID"
+          aria-describedby="world-site-id-hint"
+          disabled={state === "saving"}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void commit();
+            if (e.key === "Escape") setDraft(value ?? "");
+          }}
+        />
+        {changed && (
+          <button
+            type="button"
+            className="btn-text shrink-0 px-2 py-1 text-caption"
+            onClick={() => void commit()}
+            disabled={state === "saving"}
+          >
+            {state === "saving" ? "Saving…" : "Save"}
+          </button>
+        )}
+      </div>
+      <p id="world-site-id-hint" className="mt-1 text-caption text-void-black/50" role={error ? "alert" : undefined}>
+        {error ?? "Scaniverse Site the phone aligns to. Enter to save."}
+      </p>
     </div>
   );
 }

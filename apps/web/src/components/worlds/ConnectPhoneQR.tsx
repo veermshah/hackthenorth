@@ -77,10 +77,6 @@ export function ConnectPhoneQR({
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-body-sm">
           <dt className="text-void-black/50">World</dt>
           <dd className="truncate font-mono text-[12px] text-void-black">{info.worldId}</dd>
-          <dt className="text-void-black/50">Niantic site</dt>
-          <dd className="truncate font-mono text-[12px] text-void-black">
-            {info.nianticSiteId ?? <span className="font-sans text-wander-pink">not published — VPS stays off</span>}
-          </dd>
         </dl>
 
         <label htmlFor={`${id}-backend`} className="label mt-3 block text-caption text-void-black/60">
@@ -101,7 +97,7 @@ export function ConnectPhoneQR({
           </p>
         )}
         <p className="mt-2 text-caption text-void-black/50">
-          The code carries the world, site and backend only. The API key and Niantic token stay on the phone.
+          The code carries the world and the backend it posts to. The API key and Niantic token stay on the phone.
         </p>
 
         <div className="mt-3 flex items-center gap-2">
@@ -142,7 +138,7 @@ export function ConnectPhoneDialog({ open, info, onClose }: { open: boolean; inf
             </h2>
             <p className="mt-1 text-body-sm text-graphite">
               On the front phone open Settings › <strong>Scan world QR</strong>, or point the iOS Camera at the code.
-              The phone takes this world, its Niantic site and the backend, then starts localizing.
+              The phone takes this world and the backend, then starts localizing.
             </p>
           </div>
           <button type="button" className="btn-icon" aria-label="Close" onClick={onClose}>

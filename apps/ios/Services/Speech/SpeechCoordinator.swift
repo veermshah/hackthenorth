@@ -17,25 +17,32 @@ final class SpeechCoordinator: NSObject, ObservableObject {
     override init() {
         super.init()
         synthesizer.delegate = self
-        configureAudioSession()
     }
 
-    private func configureAudioSession() {
+    /// Plain playback for spoken cues. Skipped while a voice call owns the session: during a call the
+    /// backend speaks the cues, and `FrontPipeline` disables this coordinator anyway.
+    private func configureAudioSession() -> Bool {
+        guard AudioSessionCoordinator.shared.mode != .call else { return false }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
+            try AudioSessionCoordinator.shared.activate(.speech)
+            return true
         } catch {
             print("[Speech] audio session error: \(error)")
+            return false
         }
     }
+
+    /// Nothing is spoken unless the wearer turned voice cues on in Settings.
+    var isEnabled = false
 
     /// Returns true when the cue was actually spoken.
     @discardableResult
     func speak(_ cue: SpokenCue) -> Bool {
+        guard isEnabled else { return false }
         let now = Date()
         if cue.text == lastCueText, now.timeIntervalSince(lastCueTime) < cooldown { return false }
         if isSpeaking, cue.priority < currentPriority { return false }
+        guard configureAudioSession() else { return false }
         if isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
 
         let utterance = AVSpeechUtterance(string: cue.text)

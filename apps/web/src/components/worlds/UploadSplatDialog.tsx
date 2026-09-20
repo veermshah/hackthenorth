@@ -6,6 +6,7 @@ import { Icon } from "@/components/Icon";
 import {
   createWorldWithSplat,
   formatBytes,
+  uploadMeshForWorld,
   uploadSplatForWorld,
   type UploadProgress,
 } from "@/lib/upload-client";
@@ -27,6 +28,7 @@ type Props = {
 };
 
 const ACCEPT = SPLAT_FILE_EXTENSIONS.join(",");
+const MESH_ACCEPT = ".glb,model/gltf-binary";
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 type Phase = { kind: "idle" } | { kind: "busy"; stage: string; progress: UploadProgress | null } | { kind: "error"; message: string };
@@ -43,7 +45,8 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
   const [id, setId] = useState("");
   const [idTouched, setIdTouched] = useState(false);
   const [space, setSpace] = useState("");
-  const [site, setSite] = useState("");
+  /** Aligned collision mesh; optional, but waypoint generation needs it. */
+  const [mesh, setMesh] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
@@ -51,7 +54,7 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
   const existing = mode.kind === "existing" ? mode.manifest : null;
   const derivedId = idTouched ? id : slugifyWorldId(name);
   const idValid = ID_RE.test(derivedId);
-  const canSubmit = existing ? !!file : name.trim().length > 0 && idValid;
+  const canSubmit = existing ? !!file || !!mesh : name.trim().length > 0 && idValid;
 
   // Reset when (re)opened.
   const openedRef = useRef(false);
@@ -62,7 +65,7 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
       setId("");
       setIdTouched(false);
       setSpace("");
-      setSite("");
+      setMesh(null);
       setPhase({ kind: "idle" });
     }
     openedRef.current = open;
@@ -89,6 +92,21 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
     if (!existing && !name) setName(f.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " "));
   }
 
+  function pickMesh(f: File | undefined) {
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith(".glb")) {
+      setPhase({ kind: "error", message: `"${f.name}" isn't a mesh. Export the Scaniverse mesh as .glb.` });
+      return;
+    }
+    setPhase({ kind: "idle" });
+    setMesh(f);
+  }
+
+  /** The drop zone takes both files: .glb is the mesh, everything else the splat. */
+  function dropFiles(list: FileList) {
+    for (const f of list) (f.name.toLowerCase().endsWith(".glb") ? pickMesh : pickFile)(f);
+  }
+
   async function submit() {
     if (!canSubmit || busy) return;
     const controller = new AbortController();
@@ -97,14 +115,21 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
       setPhase((p) => (p.kind === "busy" ? { ...p, progress } : p));
     const onStage = (stage: string) => setPhase({ kind: "busy", stage, progress: null });
     try {
-      const manifest = existing
-        ? await uploadSplatForWorld(existing, file!, onProgress, onStage, controller.signal)
-        : await createWorldWithSplat(
-            { id: derivedId, name: name.trim(), space: space.trim(), nianticSiteId: site.trim(), file },
-            onProgress,
-            onStage,
-            controller.signal,
-          );
+      let manifest: WorldManifest;
+      if (existing) {
+        manifest = file ? await uploadSplatForWorld(existing, file, onProgress, onStage, controller.signal) : existing;
+        if (mesh) {
+          onStage("Uploading mesh");
+          await uploadMeshForWorld(manifest, mesh, onProgress, controller.signal);
+        }
+      } else {
+        manifest = await createWorldWithSplat(
+          { id: derivedId, name: name.trim(), space: space.trim(), file, mesh },
+          onProgress,
+          onStage,
+          controller.signal,
+        );
+      }
       setPhase({ kind: "idle" });
       onClose();
       if (onDone) onDone(manifest);
@@ -126,12 +151,12 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id={titleId} className="text-heading-sm font-bold text-void-black">
-              {existing ? `Upload splat for ${existing.name}` : "New world"}
+              {existing ? `Upload to ${existing.name}` : "New world"}
             </h2>
             <p className="mt-1 text-body-sm text-graphite">
               {existing
-                ? `Goes to ${existing.version} if that version is still empty, otherwise to a new version.`
-                : "Export the scan from Scaniverse as .spz and drop it here. You can also create the world now and add the splat later."}
+                ? `The splat goes to ${existing.version} if that version is still empty, otherwise to a new version; the mesh follows it.`
+                : "Export the scan from Scaniverse as .spz, and the collision mesh as .glb. You can also create the world now and add the files later."}
             </p>
           </div>
           <button type="button" className="btn-icon" aria-label="Close" disabled={busy} onClick={onClose}>
@@ -149,7 +174,7 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
           onDrop={(e) => {
             e.preventDefault();
             setDragging(false);
-            pickFile(e.dataTransfer.files[0]);
+            dropFiles(e.dataTransfer.files);
           }}
           className={`mt-5 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center transition-colors duration-200 ${
             dragging ? "border-wander-blue bg-sky-tint" : "border-void-black/20 bg-stellar-white hover:border-void-black/40"
@@ -177,6 +202,34 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
               <span className="text-caption text-void-black/50">{SPLAT_FILE_EXTENSIONS.join(" · ")} · up to 2 GB</span>
             </>
           )}
+        </label>
+
+        {/* Mesh: optional here, required before waypoints can be checked or generated */}
+        <label
+          className={`mt-3 flex cursor-pointer items-center gap-3 rounded-lg border border-dashed p-3 transition-colors duration-200 ${
+            mesh ? "border-wander-sky bg-sky-tint/40" : "border-void-black/20 bg-stellar-white hover:border-void-black/40"
+          } ${busy ? "pointer-events-none opacity-60" : ""}`}
+        >
+          <input
+            type="file"
+            accept={MESH_ACCEPT}
+            className="sr-only"
+            disabled={busy}
+            onChange={(e) => pickMesh(e.target.files?.[0])}
+          />
+          <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border-2 border-wander-sky bg-pure-white text-wander-blue">
+            <Icon name={mesh ? "check" : "layers"} size={15} />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-body-sm font-medium text-void-black">
+              {mesh ? mesh.name : "Add the aligned mesh (.glb)"}
+            </span>
+            <span className="block text-caption text-void-black/50">
+              {mesh
+                ? `${formatBytes(mesh.size)} · click to change`
+                : "Optional · waypoints are checked and generated from it"}
+            </span>
+          </span>
         </label>
 
         {/* World fields (new worlds only) */}
@@ -219,21 +272,6 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
                 placeholder="Engineering 7"
                 disabled={busy}
                 onChange={(e) => setSpace(e.target.value)}
-              />
-            </Field>
-            <Field
-              label="Niantic site id"
-              htmlFor={`${titleId}-site`}
-              hint="Optional — marks the world Aligned"
-              className="sm:col-span-2"
-            >
-              <input
-                id={`${titleId}-site`}
-                className="input font-mono text-body-sm"
-                value={site}
-                placeholder="Leave empty until the VPS scan is published"
-                disabled={busy}
-                onChange={(e) => setSite(e.target.value)}
               />
             </Field>
           </div>
@@ -282,7 +320,7 @@ export function UploadSplatDialog({ open, mode, onClose, onDone }: Props) {
           )}
           <button type="button" className="btn-primary" disabled={!canSubmit || busy} onClick={submit}>
             <Icon name="upload" size={15} />
-            {existing ? "Upload" : file ? "Create & upload" : "Create draft"}
+            {existing ? "Upload" : file || mesh ? "Create & upload" : "Create draft"}
           </button>
         </div>
       </div>

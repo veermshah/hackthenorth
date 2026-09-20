@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Self-hosted map viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0e; color: #eee;
+               font-family: system-ui, sans-serif; overflow: hidden; }
+  #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 10px 14px;
+           background: rgba(10,10,14,0.85); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #panel input { padding: 6px 8px; background: #1c1c22; color: #eee; border: 1px solid #444;
+                 border-radius: 6px; }
+  #panel button { padding: 7px 14px; background: #3a7; color: #fff; border: none; border-radius: 6px; }
+  #status { position: absolute; bottom: 8px; left: 14px; z-index: 2; font-size: 0.8rem; color: #9c9; }
+  #viewer { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <input id="world" placeholder="world id" size="14">
+    <input id="revision" placeholder="revision (optional)" size="10">
+    <input id="key" type="password" placeholder="X-API-Key" size="18">
+    <button id="load">Load map</button>
+  </div>
+  <div id="status">Not loaded.</div>
+  <div id="viewer"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+
+  const el = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  el('key').value = params.get('key') || localStorage.getItem('localizeTestKey') || '';
+  el('world').value = params.get('world') || localStorage.getItem('localizeTestWorld') || 'test-building';
+  el('revision').value = params.get('revision') || localStorage.getItem('mapViewerRevision') || '';
+
+  const viewerEl = el('viewer');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(viewerEl.clientWidth, viewerEl.clientHeight);
+  viewerEl.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0b0e);
+  const camera = new THREE.PerspectiveCamera(60, viewerEl.clientWidth / viewerEl.clientHeight, 0.001, 10000);
+  camera.position.set(1, 1, 1);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  scene.add(new THREE.AxesHelper(1));
+  let currentPoints = null;
+  let currentCameras = [];
+
+  function resize() {
+    camera.aspect = viewerEl.clientWidth / viewerEl.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(viewerEl.clientWidth, viewerEl.clientHeight);
+  }
+  window.addEventListener('resize', resize);
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  function clearScene() {
+    if (currentPoints) { scene.remove(currentPoints); currentPoints = null; }
+    for (const marker of currentCameras) scene.remove(marker);
+    currentCameras = [];
+  }
+
+  el('load').onclick = async () => {
+    const key = el('key').value.trim();
+    const world = el('world').value.trim();
+    const revision = el('revision').value.trim();
+    localStorage.setItem('localizeTestKey', key);
+    localStorage.setItem('localizeTestWorld', world);
+    localStorage.setItem('mapViewerRevision', revision);
+    if (!key || !world) { el('status').textContent = 'World ID and API key are required.'; return; }
+
+    el('status').textContent = 'Loading...';
+    clearScene();
+    const query = revision ? `?revision=${encodeURIComponent(revision)}` : '';
+    const headers = { 'X-API-Key': key };
+
+    try {
+      const [plyResponse, camerasResponse] = await Promise.all([
+        fetch(`/worlds/${encodeURIComponent(world)}/localization-map/points.ply${query}`, { headers }),
+        fetch(`/worlds/${encodeURIComponent(world)}/localization-map/cameras${query}`, { headers }),
+      ]);
+      if (!plyResponse.ok) {
+        el('status').textContent = 'Error loading points: ' + (await plyResponse.text());
+        return;
+      }
+      const buffer = await plyResponse.arrayBuffer();
+      const geometry = new PLYLoader().parse(buffer);
+      geometry.computeBoundingSphere();
+      const sphere = geometry.boundingSphere;
+      const hasColor = !!geometry.getAttribute('color');
+      const pointSize = Math.max(sphere.radius * 0.01, 0.0005);
+      const material = new THREE.PointsMaterial({
+        size: pointSize, vertexColors: hasColor, color: hasColor ? 0xffffff : 0x6cf,
+      });
+      currentPoints = new THREE.Points(geometry, material);
+      scene.add(currentPoints);
+
+      let cameraCount = 0;
+      if (camerasResponse.ok) {
+        const cameras = await camerasResponse.json();
+        cameraCount = cameras.length;
+        const markerGeometry = new THREE.SphereGeometry(Math.max(sphere.radius * 0.02, 0.001), 8, 8);
+        const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xff6644 });
+        for (const cam of cameras) {
+          const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+          marker.position.set(cam.position[0], cam.position[1], cam.position[2]);
+          scene.add(marker);
+          currentCameras.push(marker);
+        }
+      }
+
+      controls.target.copy(sphere.center);
+      const distance = Math.max(sphere.radius * 2.5, 0.05);
+      camera.position.copy(sphere.center).add(new THREE.Vector3(distance, distance, distance));
+      camera.near = Math.max(distance / 1000, 0.001);
+      camera.far = distance * 100;
+      camera.updateProjectionMatrix();
+      controls.update();
+
+      el('status').textContent =
+        `${geometry.getAttribute('position').count} points, ${cameraCount} registered cameras ` +
+        `(orange spheres). Drag to orbit, scroll to zoom.`;
+    } catch (error) {
+      el('status').textContent = 'Failed: ' + error.message;
+    }
+  };
+
+  if (el('key').value && el('world').value) el('load').click();
+</script>
+</body>
+</html>

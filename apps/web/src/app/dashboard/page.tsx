@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Icon } from "@/components/Icon";
 import { TopBar } from "@/components/dashboard/TopBar";
-import { QuickStart } from "@/components/dashboard/QuickStart";
 import { WorldsBrowser, type WorldView } from "@/components/dashboard/WorldsBrowser";
 import { IMAGES } from "@/lib/images";
 import { hasImage } from "@/lib/images.server";
@@ -55,7 +54,6 @@ export default async function DashboardPage() {
             <Icon name="x" size={16} className="text-wander-pink" />
           </div>
         )}
-        <QuickStart />
         <WorldsBrowser worlds={worlds} emptyMessage={emptyMessage} />
       </main>
     </>

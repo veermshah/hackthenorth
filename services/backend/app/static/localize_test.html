@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Self-hosted localization test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 16px;
+         background: #111; color: #eee; }
+  h1 { font-size: 1.1rem; }
+  .warn { background: #442; color: #fd6; padding: 8px 12px; border-radius: 6px; font-size: 0.85rem; }
+  label { display: block; margin-top: 10px; font-size: 0.85rem; color: #aaa; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px;
+          background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  button { margin-top: 12px; padding: 10px 16px; border-radius: 6px; border: none;
+           background: #3a7; color: #fff; font-size: 1rem; }
+  button:disabled { background: #555; }
+  video { width: 100%; margin-top: 12px; border-radius: 6px; background: #000; }
+  pre { background: #1a1a1a; padding: 10px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+  #history { padding-left: 18px; font-size: 0.85rem; color: #ccc; }
+</style>
+</head>
+<body>
+  <h1>Self-hosted visual localization — test harness</h1>
+  <p class="warn">Disposable dev/testing page, not production UI. Requires the world's
+    alignment.frame to be "self-hosted-vps" and a map already built via
+    <code>modal run -m services.backend.deployment.modal_localization</code>.</p>
+
+  <label>World ID <input id="world" placeholder="test-building"></label>
+  <label>API Key <input id="key" type="password" placeholder="X-API-Key"></label>
+
+  <button id="start">Start camera</button>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas" hidden></canvas>
+  <button id="capture" disabled>Capture &amp; localize</button>
+
+  <pre id="result">No query yet.</pre>
+  <h2>Recent queries</h2>
+  <ul id="history"></ul>
+
+<script>
+  const el = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+
+  el('key').value = params.get('key') || localStorage.getItem('localizeTestKey') || '';
+  el('world').value = localStorage.getItem('localizeTestWorld') || 'test-building';
+
+  let sessionId = null;
+
+  el('start').onclick = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      el('video').srcObject = stream;
+      el('capture').disabled = false;
+    } catch (error) {
+      el('result').textContent = 'Camera error: ' + error.message;
+    }
+  };
+
+  function currentKeyAndWorld() {
+    const key = el('key').value.trim();
+    const world = el('world').value.trim();
+    localStorage.setItem('localizeTestKey', key);
+    localStorage.setItem('localizeTestWorld', world);
+    return { key, world };
+  }
+
+  el('capture').onclick = async () => {
+    const { key, world } = currentKeyAndWorld();
+    const video = el('video');
+    const canvas = el('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    const imageBase64 = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.readAsDataURL(blob);
+    });
+
+    el('result').textContent = 'Localizing... (first query after a cold container can take ~1-2 minutes)';
+    const body = {
+      deviceId: 'localize-test-page', capturedAt: new Date().toISOString(),
+      imageBase64, width: canvas.width, height: canvas.height,
+    };
+    if (sessionId) body.sessionId = sessionId;
+
+    try {
+      const response = await fetch(`/worlds/${encodeURIComponent(world)}/localize/self-hosted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        el('result').textContent = 'Error: ' + JSON.stringify(data, null, 2);
+        return;
+      }
+      sessionId = data.sessionId;
+      el('result').textContent = JSON.stringify(data, null, 2);
+      loadHistory();
+    } catch (error) {
+      el('result').textContent = 'Request failed: ' + error.message;
+    }
+  };
+
+  async function loadHistory() {
+    const { key, world } = currentKeyAndWorld();
+    if (!key || !world) return;
+    try {
+      const response = await fetch(
+        `/worlds/${encodeURIComponent(world)}/localizations/self-hosted?limit=10`,
+        { headers: { 'X-API-Key': key } },
+      );
+      if (!response.ok) return;
+      const data = await response.json();
+      el('history').innerHTML = data.queries.map((q) =>
+        `<li>${q.receivedAt} — ${q.trackingState}` +
+        `${q.confidence != null ? ` (confidence ${q.confidence.toFixed(2)})` : ''}</li>`,
+      ).join('') || '<li>None yet.</li>';
+    } catch (error) {
+      // Best-effort history; ignore failures here.
+    }
+  }
+
+  if (el('key').value && el('world').value) loadHistory();
+</script>
+</body>
+</html>

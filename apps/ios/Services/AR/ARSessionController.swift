@@ -11,6 +11,11 @@ struct FrameSnapshot: @unchecked Sendable {
     let capturedImage: CVPixelBuffer
     let depthMap: CVPixelBuffer?
     let imageResolution: CGSize
+    /// Sparse world-space feature points and vertical planes; filled only when
+    /// there is no depth map, for the structure-based obstacle estimate.
+    var featurePoints: [simd_float3] = []
+    var featurePointIDs: [UInt64] = []
+    var verticalPlanes: [VerticalPlane] = []
 }
 
 /// Owns the one ARKit session for the front phone. Every consumer, including the
@@ -73,7 +78,7 @@ final class ARSessionController: NSObject, ObservableObject {
 extension ARSessionController: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let depth = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
-        let snapshot = FrameSnapshot(
+        var snapshot = FrameSnapshot(
             timestamp: frame.timestamp,
             cameraTransform: frame.camera.transform,
             intrinsics: frame.camera.intrinsics,
@@ -81,6 +86,15 @@ extension ARSessionController: ARSessionDelegate {
             depthMap: depth,
             imageResolution: frame.camera.imageResolution
         )
+        if depth == nil {
+            snapshot.featurePoints = frame.rawFeaturePoints?.points ?? []
+            snapshot.featurePointIDs = frame.rawFeaturePoints?.identifiers ?? []
+            snapshot.verticalPlanes = frame.anchors.compactMap { anchor -> VerticalPlane? in
+                guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .vertical else { return nil }
+                return VerticalPlane(transform: plane.transform, center: plane.center,
+                                     extent: simd_float2(plane.planeExtent.width, plane.planeExtent.height))
+            }
+        }
         Task { @MainActor in self.ingest(snapshot) }
     }
 

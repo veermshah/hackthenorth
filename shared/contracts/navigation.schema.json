@@ -76,8 +76,10 @@
           ],
           "description": "Defaults to the session's last known position when omitted."
         },
-        "to": { "type": "string", "description": "Destination node id (usually kind = destination)." },
-        "avoid": { "type": "array", "items": { "type": "string" }, "description": "Node ids to route around (e.g. closed doors)." }
+        "to": { "type": "string", "description": "Destination node id (usually kind = destination), or `note:<noteId>` for a note pinned in the web viewer: the route then ends at the point on the nearest walkable edge beside the note, as a virtual node named after it." },
+        "avoid": { "type": "array", "items": { "type": "string" }, "description": "Node ids to route around (e.g. closed doors)." },
+        "headingDeg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360, "description": "Traveller's heading at `from` (world convention: clockwise from above, 0 = -Z, 90 = +X). The first instruction turns relative to it; without it the first turn is 'straight'." },
+        "accessibleOnly": { "type": "boolean", "default": false, "description": "Skip edges whose `accessible` is false (stairs, escalators, stepped paths); floor changes then go by elevator or ramp." }
       }
     },
 
@@ -98,7 +100,8 @@
               "from": { "type": "string" },
               "to": { "type": "string" },
               "distanceMetres": { "type": "number" },
-              "headingDeg": { "type": "number", "description": "Compass-style heading in the world frame, 0 = -Z, clockwise." }
+              "headingDeg": { "type": "number", "description": "Compass-style heading in the world frame, 0 = -Z, clockwise." },
+              "kind": { "type": "string", "enum": ["walk", "stairs", "escalator", "elevator", "ramp"], "description": "Edge kind; omitted means walk." }
             }
           }
         },
@@ -113,9 +116,23 @@
       "additionalProperties": false,
       "properties": {
         "atNode": { "type": "string" },
-        "turn": { "type": "string", "enum": ["straight", "slight-left", "left", "sharp-left", "slight-right", "right", "sharp-right", "u-turn", "arrive"] },
-        "text": { "type": "string", "description": "Short spoken cue, e.g. 'Left in 3 metres'." },
-        "distanceMetres": { "type": "number", "description": "Distance from the previous instruction." }
+        "turn": { "type": "string", "enum": ["straight", "slight-left", "left", "sharp-left", "slight-right", "right", "sharp-right", "u-turn", "stairs", "escalator", "elevator", "ramp", "arrive"], "description": "Turn bucket, or the vertical transition to take (stairs / escalator / elevator / ramp) when the next leg changes floors." },
+        "text": { "type": "string", "description": "Short spoken cue, e.g. 'Left at Reception desk, then continue 12 metres, passing Bottle filler on your right.' or 'Take the elevator to floor 2'." },
+        "distanceMetres": { "type": "number", "description": "Distance from the previous instruction." },
+        "landmarks": {
+          "type": "array",
+          "description": "Human-reviewed annotations woven into `text`: `at` sits within 3 m of the turn node; `left`/`right` is passed beside the leg. Positions come from the published graph/notes, never from the language model.",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "relation"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "relation": { "type": "string", "enum": ["at", "left", "right"] }
+            }
+          }
+        }
       }
     },
 
@@ -128,7 +145,8 @@
         "sessionId": { "type": "string" },
         "worldId": { "type": "string" },
         "deviceId": { "type": "string" },
-        "destination": { "type": "string", "description": "Destination node id." },
+        "destination": { "type": "string", "description": "Destination node id, or `note:<noteId>` for a pinned note (see routeRequest.to). Absent when no guidance is active; DELETE /sessions/{id}/destination clears it." },
+        "accessibleOnly": { "type": "boolean", "description": "Every route and reroute in this session is computed with `accessibleOnly`." },
         "route": { "$ref": "#/$defs/routeResponse" },
         "state": { "type": "string", "enum": ["localizing", "navigating", "off-route", "arrived", "lost", "ended"] },
         "lastPose": { "$ref": "#/$defs/pose" },
@@ -163,7 +181,8 @@
         "remainingMetres": { "type": "number" },
         "instruction": { "$ref": "#/$defs/instruction" },
         "offRouteMetres": { "type": "number", "description": "Perpendicular distance from the route; > 3 m flips state to off-route." },
-        "speak": { "type": "string", "description": "Exact phrase the phone should say now, if any." }
+        "speak": { "type": "string", "description": "Exact phrase the phone should say now, if any." },
+        "headingDeg": { "type": "number", "description": "Traveller's heading derived from the pose rotation (0 = -Z, 90 = +X, clockwise). `instruction` is relative to it." }
       }
     },
 

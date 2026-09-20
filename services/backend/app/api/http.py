@@ -1,15 +1,37 @@
 import asyncio
+import json
+from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, Query as QueryParam
+from fastapi.responses import HTMLResponse, StreamingResponse
 from ..models import SessionRequest, DestinationRequest, Query, Document
 from ..integrations.elastic.ingestion import extract_text
 from ..services.sessions import broadcast
 
 router = APIRouter()
+STATIC_DIR = Path(__file__).resolve().parents[1] / 'static'
+LOCALIZE_TEST_PAGE = (STATIC_DIR / 'localize_test.html').read_text(encoding='utf-8')
+MAP_VIEWER_PAGE = (STATIC_DIR / 'map_viewer.html').read_text(encoding='utf-8')
 
 
 @router.get('/health')
 async def health():
     return {'status': 'ok'}
+
+
+@router.get('/localize-test', response_class=HTMLResponse)
+async def localize_test_page():
+    """Disposable dev harness for services/backend/deployment/modal_localization.py.
+    Reachable via ?key=... (see APIKeyMiddleware) since a plain browser navigation
+    can't set a custom header; the page's own API calls use the header normally."""
+    return LOCALIZE_TEST_PAGE
+
+
+@router.get('/map-viewer', response_class=HTMLResponse)
+async def map_viewer_page():
+    """Disposable dev harness: renders a build_map point cloud + registered
+    camera positions with Three.js. See app/api/worlds.py's
+    GET /worlds/{id}/localization-map/points.ply and .../cameras."""
+    return MAP_VIEWER_PAGE
 
 
 @router.post('/legacy/sessions', status_code=201)
@@ -44,7 +66,23 @@ async def destination(session_id: str, body: DestinationRequest, request: Reques
 
 @router.post('/assistant/query')
 async def query(body: Query, request: Request):
-    return await request.app.state.agent.query(body.session_id, body.text)
+    return await request.app.state.agent.query(body.session_id, body.text, body.ui_context)
+
+
+@router.post('/assistant/query/stream')
+async def query_stream(body: Query, request: Request):
+    """Server-sent events: zero or more {"type":"delta","text":...} chunks as the model's
+    final answer streams in, then one {"type":"final", text, sources, actions, tool_calls}
+    event. Same agent loop and session state as POST /assistant/query; that endpoint stays
+    non-streaming for callers (the mobile call view) that need one complete answer to speak."""
+    async def events():
+        async for event in request.app.state.agent.query_stream(body.session_id, body.text, body.ui_context):
+            if event['type'] == 'delta':
+                yield f"data: {json.dumps({'type': 'delta', 'text': event['text']})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'final', **event['payload']})}\n\n"
+    return StreamingResponse(events(), media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @router.post('/knowledge/documents', status_code=201)

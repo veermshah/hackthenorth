@@ -198,6 +198,13 @@ final class NianticLocalizer: NSObject, ObservableObject {
         )
     }
 
+    /// The SDK's anchor timestamp is not guaranteed to be Unix time (the backend
+    /// rejected fixes as stale). Use it only when it is within a minute of now.
+    static func fixDate(sdkMillis: some BinaryInteger) -> Date {
+        let candidate = Date(timeIntervalSince1970: TimeInterval(sdkMillis) / 1000)
+        return abs(candidate.timeIntervalSinceNow) < 60 ? candidate : Date()
+    }
+
     private func publishFinishedQueries() {
         let done = tracker.drainFinished()
         queryStats = tracker.stats
@@ -247,7 +254,7 @@ final class NianticLocalizer: NSObject, ObservableObject {
         let pose = SitePose.deviceInAnchorFrame(anchor: data.targetAnchorTransform, device: lastCameraTransform)
         latestFix = LocalizationFix(
             pose: pose, state: state, confidence: data.confidence,
-            timestamp: Date(timeIntervalSince1970: TimeInterval(data.timestampMs) / 1000),
+            timestamp: Self.fixDate(sdkMillis: data.timestampMs),
             anchorTransform: data.targetAnchorTransform
         )
         tracker.attachAnchor(transform: data.targetAnchorTransform, state: anchorState,

@@ -87,6 +87,9 @@ class Obstacle(Model):
 class Query(Model):
     session_id: str
     text: str = Field(min_length=1, max_length=8000)
+    # What the dashboard UI currently shows (selected note/waypoint, active tab);
+    # a hint for pronoun resolution, never live sensor/navigation truth.
+    ui_context: str | None = Field(default=None, max_length=2000)
 
 
 class Document(Model):

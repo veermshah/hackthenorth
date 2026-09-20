@@ -10,8 +10,28 @@ struct HapticCommand: Codable, Equatable, Sendable {
     var back = false
     /// Distance to the nearest triggering obstacle, driving pulse speed.
     var distance: Float? = nil
+    /// Per-mount distances so each phone pulses at its own proximity (nil: use `distance`).
+    var leftDistance: Float? = nil
+    var rightDistance: Float? = nil
+    var backDistance: Float? = nil
+    /// Distance at which the side and back pulses start; the receiving phone ramps over it.
+    var sideRange: Float? = nil
+    var backRange: Float? = nil
 
     static let none = HapticCommand()
+
+    var isNone: Bool { !front && !left && !right && !back }
+
+    /// The distance that should drive this phone's pulse; nil when it should not buzz.
+    func distance(for role: DeviceRole) -> Float? {
+        guard shouldBuzz(role) else { return nil }
+        return switch role {
+        case .front: distance
+        case .left: leftDistance ?? distance
+        case .right: rightDistance ?? distance
+        case .back: backDistance ?? distance
+        }
+    }
 
     func shouldBuzz(_ role: DeviceRole) -> Bool {
         switch role {
@@ -41,10 +61,15 @@ struct ObstacleCuePolicy {
     var stopDistance: Float = 0.9
     /// With the front blocked, a side closer than this buzzes as well.
     var sideBlockedDistance: Float = 1.0
-    /// On its own, a side closer than this buzzes and speaks a veer cue.
-    var veerDistance: Float = 0.6
+    /// On its own, a side closer than this is "very close": that mount buzzes hard.
+    var veerDistance: Float = 0.2
     /// A side counts as open when nothing is closer than this on that side.
     var openDistance: Float = 1.2
+    /// A wall or obstacle within this distance beside the wearer pulses that side's
+    /// phone, graded by distance, without speech. Fed by the side phones' own sensing
+    /// and by the static map once the front phone is localised.
+    var sideWarnDistance: Float = 0.4
+    var backWarnDistance: Float = 0.3
     /// Side readings older than this are ignored.
     var maxClearanceAge: TimeInterval = 1.0
     /// Assumed distance when a phone reports nothing in range.
@@ -73,11 +98,22 @@ struct ObstacleCuePolicy {
         let leftSpace = clearance(.left, frontZone: zones.left, sides: sides, now: now)
         let rightSpace = clearance(.right, frontZone: zones.right, sides: sides, now: now)
 
+        let backPhone = sideReading(.back, sides: sides, now: now)
+        // Graded proximity on each mount: whatever is within warning range beside or behind.
+        var proximity = HapticCommand()
+        if let d = leftPhone, d < sideWarnDistance { proximity.left = true; proximity.leftDistance = d }
+        if let d = rightPhone, d < sideWarnDistance { proximity.right = true; proximity.rightDistance = d }
+        if let d = backPhone, d < backWarnDistance { proximity.back = true; proximity.backDistance = d }
+
         if let center = zones.center, center < stopDistance {
             var nearest = center
             if leftBlocked, let d = leftPhone { nearest = min(nearest, d) }
             if rightBlocked, let d = rightPhone { nearest = min(nearest, d) }
-            let haptics = HapticCommand(front: true, left: leftBlocked, right: rightBlocked, distance: nearest)
+            var haptics = HapticCommand(front: true, left: leftBlocked, right: rightBlocked, distance: nearest)
+            haptics.leftDistance = leftBlocked ? leftPhone : nil
+            haptics.rightDistance = rightBlocked ? rightPhone : nil
+            haptics.back = proximity.back
+            haptics.backDistance = proximity.backDistance
 
             if leftSpace < openDistance && rightSpace < openDistance {
                 return Decision(
@@ -98,35 +134,48 @@ struct ObstacleCuePolicy {
                 openSide: openSide
             )
         }
-        // A side phone alone sees something very close: that phone buzzes.
+        // A side phone alone sees something very close: that phone buzzes and the wearer is told.
         if let d = leftPhone, d < veerDistance {
+            var haptics = proximity
+            haptics.left = true; haptics.leftDistance = d; haptics.distance = d
             return Decision(
                 cue: SpokenCue(text: "Obstacle on your left. Move right.", priority: .obstacle),
-                haptics: HapticCommand(left: true, distance: d),
+                haptics: haptics,
                 openSide: .right
             )
         }
         if let d = rightPhone, d < veerDistance {
+            var haptics = proximity
+            haptics.right = true; haptics.rightDistance = d; haptics.distance = d
             return Decision(
                 cue: SpokenCue(text: "Obstacle on your right. Move left.", priority: .obstacle),
-                haptics: HapticCommand(right: true, distance: d),
+                haptics: haptics,
                 openSide: .left
             )
         }
         // The front phone's own edge zones see something very close: the front buzzes.
         if let d = zones.left, d < veerDistance {
+            var haptics = proximity
+            haptics.front = true; haptics.distance = d
             return Decision(
                 cue: SpokenCue(text: "Obstacle close on your left. Move right.", priority: .obstacle),
-                haptics: HapticCommand(front: true, distance: d),
+                haptics: haptics,
                 openSide: .right
             )
         }
         if let d = zones.right, d < veerDistance {
+            var haptics = proximity
+            haptics.front = true; haptics.distance = d
             return Decision(
                 cue: SpokenCue(text: "Obstacle close on your right. Move left.", priority: .obstacle),
-                haptics: HapticCommand(front: true, distance: d),
+                haptics: haptics,
                 openSide: .left
             )
+        }
+        // Nothing to say, but a wall or obstacle beside or behind the wearer still pulses that mount.
+        if !proximity.isNone {
+            proximity.distance = [proximity.leftDistance, proximity.rightDistance, proximity.backDistance].compactMap { $0 }.min()
+            return Decision(cue: nil, haptics: proximity, openSide: nil)
         }
         return .clear
     }

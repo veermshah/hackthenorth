@@ -1,63 +1,72 @@
-# Main world integration
+# Live voice bridge (protocol v2)
 
-Create a canonical session with {worldId, deviceId}, use the returned sessionId,
-and send X-API-Key on the voice WebSocket upgrade in addition to the first-message
-voice token. Niantic poses now go to POST /sessions/{id}/pose; the dashboard WS is
-read-only. World sessions persist. Production ownership and voice interruption
-limitations below still apply. See services/backend/WORLDS_MIGRATION.md.
+Endpoint: `/ws/sessions/{session_id}/voice`. Create the canonical session first
+(`POST /sessions {worldId, deviceId}` or the session `/localize` hands back) and keep sending
+poses to `POST /sessions/{id}/pose`; the voice call attaches to that session's navigation state.
+Upgrade with `X-API-Key` like every other request, then authenticate with the first message.
 
----
+The backend holds the primary OpenAI GPT-Live WebSocket (`gpt-live-1`, client delegation);
+the API key never reaches the phone. Delegated requests run through the existing grounded
+Responses agent (`OPENAI_MODEL`, e.g. `gpt-5.6-terra`). Navigation cues computed by
+`WorldNavigation` are forwarded to the voice as they are emitted, so during a call the phone
+should not speak them itself. Implementation: `services/backend/app/services/voice_bridge.py`;
+design and phases: `docs/VOICE_AGENT_PLAN.md`.
 
-# Live voice handoff (experimental backend implementation)
+Enable with `VOICE_ENABLED=true`, `VOICE_ACCESS_TOKEN` (shared demo token, not per-user
+authorization; never embed it in a public build) and `OPENAI_API_KEY`. One active call per
+session; a second connection is closed with 1008.
 
-Endpoint: `/ws/sessions/{session_id}/voice`. Create the existing navigation session
-first and continue supplying Niantic pose updates on the existing navigation WS.
+## Client → backend
 
-The existing `/assistant` WS remains text-only. The new bridge uses OpenAI Live
-`gpt-live-1` for audio and client-owned delegation to the current Responses agent.
-Set OPENAI_MODEL=gpt-6-astra to use Astra for those delegated requests; the Live
-model is configured independently. Astra is not the audio transport model.
+| Message | Notes |
+| --- | --- |
+| `{"type":"auth","token":"…"}` | First message, within 10 s. |
+| `{"type":"audio","audio":"<base64>"}` | Raw PCM16LE mono 24 kHz, no WAV header, even byte count, ≤ 64 KiB encoded; ~100 ms chunks. Keep sending silence while listening. |
+| `{"type":"text","text":"…"}` | Typed request (≤ 2000 chars) through the same delegation path; the answer is spoken. |
+| `{"type":"mute"}` / `{"type":"unmute"}` | Live input mute; output and backend work continue. |
+| `{"type":"close"}` | Graceful end; wait for `closed`. |
 
-Enable VOICE_ENABLED=true and configure VOICE_ACCESS_TOKEN plus OPENAI_API_KEY.
-This is a shared demo token, not per-user production authorization. Do not ship
-it embedded in a public app; production needs authenticated session ownership.
-The remaining backend routes still use the existing unauthenticated demo model.
+## Backend → client
 
-## Client protocol
+| Message | Notes |
+| --- | --- |
+| `{"type":"voice_ready","format":"pcm16le","rate":24000,"channels":1,"ai_generated_voice":true,"voice":"marin","liveSessionId":"…"}` | Start capture/playback after this. The UI must show an AI-generated-voice disclosure. |
+| `{"type":"audio","audio":"…"}` | Play in order at 24 kHz. Keep ≤ ~250 ms queued: Live is full duplex and there is no audio-done or interruption event on this transport. |
+| `{"type":"transcript","speaker":"user\|assistant","delta":"…","start_ms":…,"end_ms":…}` | Fragments on the Live timeline, not complete turns. |
+| `{"type":"assistant_response","text":…,"sources":[…],"actions":[…],"tool_calls":[…]}` | Backend result for a delegated request. Apply `actions` to local navigation state: `{"type":"set_destination","destination_id":"room-101" \| "note:<id>","destination_name":"…","accessible_only":bool}` and `{"type":"stop_navigation","destination_id":…}`. |
+| `{"type":"navigation","event":{…}}` | Mirror of the session events on `/ws/sessions/{id}` (`progress` without `route`, `rerouted`, `arrived`, `lost`, `localized`, `ended`), throttled to 2 Hz for plain progress. |
+| `{"type":"usage","seconds":…}` | Cumulative Live voice seconds (snapshot, not additive). |
+| `{"type":"warning","code":"…"}` | A rejected command or moderation cut-off; the call continues. |
+| `{"type":"renewed","liveSessionId":"…"}` | The Live session expired and was replaced with the transcript re-seeded; keep streaming. |
+| `{"type":"closed","reason":"…","seconds":…,"renewing":bool}` | Live session finished. `renewing: true` means a replacement follows; otherwise the socket closes. Reasons: `close_requested`, `expired`, `content`, `remote_hangup`, `connection_lost`, `max_duration`. |
+| `{"type":"error","message":"…"}` | Sanitised; the socket closes. Reconnect explicitly; never replay action requests. |
 
-1. Open WS and within 10 seconds send `{"type":"auth","token":"demo-access-token"}`.
-2. Wait for `voice_ready` (pcm16le, rate 24000, channels 1).
-3. Send `{"type":"audio","audio":"<base64 raw PCM>"}` in roughly 100 ms chunks.
-   Use little-endian signed 16-bit mono, 24 kHz. No WAV header. Maximum encoded
-   chunk is 64 KiB. Only auth, audio and close messages are accepted.
-4. Play returned `{"type":"audio","audio":"..."}` chunks in order at 24 kHz.
-5. Transcript events contain speaker=user/assistant and delta text; fragments are
-   not complete turns. assistant_response includes backend text/sources/actions.
-6. `{"type":"close"}` ends the call. Calls are capped at 15 minutes. Errors are
-   sanitized. Reconnect explicitly after failure; never replay action requests.
+## How the bridge steers the voice
 
-Native/web owners must implement microphone capture, resampling, echo cancellation,
-audio playback and a visible AI-generated voice disclosure. No microphone UI is
-added by this backend implementation. Use HTTPS/WSS for remote connections.
+- Session start: Live prompt `prompts/live_frontend.txt`, voice `VOICE_NAME`, `input` seeded with the
+  world's place names and note titles (so the model recognises "Bed 1" as a destination). After
+  `session.started` a greeting + AI disclosure is requested with `session.instructions.append`.
+- Delegation: `session.delegation.created` carries no task text. The bridge waits
+  `VOICE_TRANSCRIPT_GRACE_S` for late fragments, takes the user's speech after the last substantial
+  assistant turn (backchannels do not split it), passes the recent dialogue as context, appends
+  `thinking` progress, then the agent's answer as `commentary` and, after `set_destination`, a silent
+  route summary. No transcript → the model is told to ask the user to repeat.
+- Navigation: `progress.speak` phrases become `commentary`; `arrived`, `off-route` and `lost` cues are
+  requested verbatim with `instructions.append` (which may interrupt speech). Duplicates within 3 s collapse.
+- Situation: every `VOICE_CONTEXT_INTERVAL_S` (when changed) a one-paragraph `thinking` update with the
+  nearest stop, notes within 10 m with side, and guidance state.
+- Lifecycle: proactive renewal 60 s before Live `expires_at` and after `expired`/`connection_lost`,
+  with buffered microphone audio flushed into the new session; `VOICE_MAX_MINUTES` caps a call.
 
-## Delegation and limitations
+## Limitations
 
-The backend collects input transcript fragments and, on session.delegation.created,
-submits available fragments ending at/before that event's offset to the existing
-agent. Duplicate delegation IDs are ignored. Missing transcript causes a repeat
-request, not guessed work. A bounded worker processes delegations serially while
-audio continues. Current pose/routes are injected by the existing agent context.
+Obstacle warnings stay on haptics; this path is not the hazard channel. Cue wording sent as commentary
+may be paraphrased. Delegation/transcript timing on real sessions is being verified in Phase 0
+(`python -m services.backend.scripts.test_voice --say "where am I"`, `VOICE_TRACE=true` on the backend).
 
-Live has no transcript-done event or task text in delegation.created. Timeline
-ordering and incomplete/late transcripts must be checked with real recordings.
-This bridge has mocked protocol tests, not a verified production audio session.
-Commentary is speakable context, not a guarantee of exact wording or playback.
-
-The bridge does not yet implement interruption-aware cancellation, automatic
-obstacle announcements, or clearing queued client audio on barge-in. Navigation
-and obstacle events still arrive on the navigation WS and must take priority in
-the client's audio UX. Do not use this experimental voice path as the immediate
-hazard-alert channel. A disconnected/cancelled model turn may already have set a
-destination; consult navigation state after reconnecting.
-
-Protocol reference: https://developers.openai.com/api/reference/resources/live/primary-websocket
+Guidance targets are graph nodes and notes pinned in the web viewer (`note:<id>`): the route ends on the
+walkable edge beside the note and the arrival cue adds where the note is ("Bed 1 is 2 metres on your
+right"). `DELETE /sessions/{id}/destination` stops guidance; `POST /sessions/{id}/pose` accepts poses
+with no destination, so the phone should stream poses whenever it has a fresh fix and adopt destinations
+from `assistant_response.actions`. Protocol reference:
+https://developers.openai.com/api/reference/resources/live/primary-websocket

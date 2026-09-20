@@ -46,10 +46,55 @@ struct LocalizationQueryResponse: Decodable, Equatable, Sendable {
     let offGraphMetres: Double?
 }
 
+/// A note pinned to a point on the scan in the web viewer, mirroring
+/// `notes.schema.json`. Positions are in the world frame, in metres — the same
+/// frame `SitePose` reports, so the two can be compared directly.
+struct WorldNote: Decodable, Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    /// Human-readable place, e.g. "2nd floor, outside room 204".
+    let location: String?
+    let description: String?
+    let position: [Float]
+    let author: String?
+    let createdAt: String
+
+    var point: SIMD3<Float> {
+        position.count == 3 ? SIMD3(position[0], position[1], position[2]) : .zero
+    }
+}
+
 struct WorldSummary: Decodable, Sendable {
     let id: String
     let name: String
     let nianticSiteId: String?
+}
+
+/// A navigation graph node the user can pick as a destination.
+struct GraphNode: Decodable, Equatable, Identifiable, Sendable {
+    let id: String
+    let name: String?
+    let kind: String?
+    var label: String { name ?? id }
+}
+
+/// What the backend answered to a pose update: `progressUpdate` in the contract.
+/// `speak` is the exact phrase the phone should say now, if anything.
+struct ProgressUpdate: Decodable, Equatable, Sendable {
+    struct Instruction: Decodable, Equatable, Sendable {
+        let atNode: String
+        let turn: String
+        let text: String
+        let distanceMetres: Double?
+    }
+    let state: String
+    let remainingMetres: Double
+    let distanceToNextMetres: Double?
+    let nextNode: GraphNode?
+    let instruction: Instruction?
+    let offRouteMetres: Double?
+    let headingDeg: Double?
+    let speak: String?
 }
 
 /// Talks to the Wander worlds API on Modal. Every request carries the team key.
@@ -71,7 +116,14 @@ struct WanderBackendClient: Sendable {
     }
 
     func request(_ method: String, _ path: String, data: Data?) -> URLRequest {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        // Keep any "?query" intact: appendingPathComponent would percent-encode the "?".
+        let parts = path.split(separator: "?", maxSplits: 1).map(String.init)
+        var url = baseURL.appendingPathComponent(parts[0])
+        if parts.count == 2, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.percentEncodedQuery = parts[1]
+            url = components.url ?? url
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 8
         request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
@@ -169,7 +221,8 @@ struct WanderBackendClient: Sendable {
     }
 
     /// `POST /sessions/{id}/pose` for high-rate ARKit poses between VPS fixes.
-    func pose(sessionId: String, pose: SitePose, state: BackendTrackingState, timestamp: Date) async throws {
+    /// The answer carries the live instruction and the exact phrase to speak.
+    func pose(sessionId: String, pose: SitePose, state: BackendTrackingState, timestamp: Date) async throws -> ProgressUpdate {
         let body: [String: Any] = [
             "pose": ["position": pose.positionArray, "rotation": pose.rotationArray],
             "trackingState": state.rawValue,
@@ -177,6 +230,75 @@ struct WanderBackendClient: Sendable {
         ]
         let (data, response) = try await session.data(for: request("POST", "sessions/\(sessionId)/pose", body: body))
         try Self.check(response, data)
+        return try JSONDecoder().decode(ProgressUpdate.self, from: data)
+    }
+
+    /// `PUT /sessions/{id}/destination`; the backend routes from the session's last pose.
+    /// `nodeId` is a graph node id or `note:<id>` for a note pinned in the web viewer.
+    func setDestination(sessionId: String, nodeId: String) async throws {
+        let (data, response) = try await session.data(
+            for: request("PUT", "sessions/\(sessionId)/destination", body: ["destination": nodeId]))
+        try Self.check(response, data)
+    }
+
+    /// `DELETE /sessions/{id}/destination`: stop guidance, keep the session and its pose stream.
+    func clearDestination(sessionId: String) async throws {
+        let (data, response) = try await session.data(for: request("DELETE", "sessions/\(sessionId)/destination"))
+        try Self.check(response, data)
+    }
+
+    /// `POST /sessions {worldId, deviceId}`: a session before any VPS fix, so the voice guide can
+    /// answer questions while the phone is still localizing.
+    func createSession(worldId: String, deviceId: String) async throws -> String {
+        let (data, response) = try await session.data(
+            for: request("POST", "sessions", body: ["worldId": worldId, "deviceId": deviceId]))
+        try Self.check(response, data)
+        struct Created: Decodable { let sessionId: String }
+        return try JSONDecoder().decode(Created.self, from: data).sessionId
+    }
+
+    /// Nodes of the world's navigation graph, from `GET /worlds/{id}`.
+    func graphNodes(worldId: String) async throws -> [GraphNode] {
+        let (data, response) = try await session.data(for: request("GET", "worlds/\(worldId)"))
+        try Self.check(response, data)
+        struct Graph: Decodable { let nodes: [GraphNode] }
+        struct World: Decodable { let navigationGraph: Graph? }
+        return try JSONDecoder().decode(World.self, from: data).navigationGraph?.nodes ?? []
+    }
+
+    /// Externally triggered buzzes queued since `since` (`GET /haptics/pending`).
+    struct PendingPulses: Decodable, Sendable {
+        struct Pulse: Decodable, Sendable { let id: Int; let role: String; let ms: Int }
+        let pulses: [Pulse]
+        let last: Int
+    }
+
+    func pendingPulses(since: Int) async throws -> PendingPulses {
+        let (data, response) = try await session.data(for: request("GET", "haptics/pending?since=\(since)"))
+        try Self.check(response, data)
+        return try JSONDecoder().decode(PendingPulses.self, from: data)
+    }
+
+    /// Static map layers for the phone's map obstacle sensor.
+    func occupancy(worldId: String) async throws -> MapOccupancyPayload {
+        let (data, response) = try await session.data(for: request("GET", "worlds/\(worldId)/occupancy"))
+        try Self.check(response, data)
+        return try JSONDecoder().decode(MapOccupancyPayload.self, from: data)
+    }
+
+    func hazards(worldId: String) async throws -> [MapHazard] {
+        let (data, response) = try await session.data(for: request("GET", "worlds/\(worldId)/hazards"))
+        try Self.check(response, data)
+        return try JSONDecoder().decode(MapHazardsPayload.self, from: data).hazards
+    }
+
+    /// `GET /worlds/{id}/notes`. An empty list when the world has none; the
+    /// backend answers 404 only when the world itself is missing.
+    func notes(worldId: String) async throws -> [WorldNote] {
+        let (data, response) = try await session.data(for: request("GET", "worlds/\(worldId)/notes"))
+        try Self.check(response, data)
+        struct File: Decodable { let notes: [WorldNote] }
+        return try JSONDecoder().decode(File.self, from: data).notes
     }
 
     func worlds() async throws -> [WorldSummary] {

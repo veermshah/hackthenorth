@@ -1,10 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import Image from "next/image";
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
 import { ImagePlaceholder } from "@/components/ImagePlaceholder";
+import { DeleteWorldDialog, type DeletableWorld } from "@/components/worlds/DeleteWorldDialog";
 import { IMAGES } from "@/lib/images";
 import { CURRENT_USER, STATUS_META, worldHref, type World } from "@/lib/worlds";
 import { Avatar, AvatarStack } from "./Avatar";
@@ -30,24 +32,34 @@ export function WorldsBrowser({
   /** Copy for the "All worlds" empty state; depends on where the server reads worlds from. */
   emptyMessage?: string;
 }) {
+  const router = useRouter();
   const [view, setView] = useState<View>("grid");
   const [tab, setTab] = useState<Tab>("all");
   const [starred, setStarred] = useState<Set<string>>(
     () => new Set(worlds.filter((w) => w.starred).map((w) => w.id)),
   );
+  const [deleting, setDeleting] = useState<DeletableWorld | null>(null);
+  /** Hidden straight away so the grid reacts to the delete; `router.refresh()` then re-reads the volume. */
+  const [deleted, setDeleted] = useState<Set<string>>(() => new Set());
 
   const visible = useMemo(() => {
+    const live = worlds.filter((w) => !deleted.has(w.id));
     switch (tab) {
       case "starred":
-        return worlds.filter((w) => starred.has(w.id));
+        return live.filter((w) => starred.has(w.id));
       case "shared":
-        return worlds.filter((w) => w.owner.name !== CURRENT_USER.name);
+        return live.filter((w) => w.owner.name !== CURRENT_USER.name);
       case "drafts":
-        return worlds.filter((w) => w.status === "draft");
+        return live.filter((w) => w.status === "draft");
       default:
-        return worlds;
+        return live;
     }
-  }, [worlds, tab, starred]);
+  }, [worlds, tab, starred, deleted]);
+
+  function onDeleted(id: string) {
+    setDeleted((prev) => new Set(prev).add(id));
+    router.refresh(); // the dashboard is force-dynamic, so this re-lists the volume
+  }
 
   function toggleStar(id: string) {
     setStarred((prev) => {
@@ -108,13 +120,25 @@ export function WorldsBrowser({
         <ul className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {visible.map((w) => (
             <li key={w.id}>
-              <WorldCard world={w} starred={starred.has(w.id)} onStar={() => toggleStar(w.id)} />
+              <WorldCard
+                world={w}
+                starred={starred.has(w.id)}
+                onStar={() => toggleStar(w.id)}
+                onDelete={() => setDeleting({ id: w.id, name: w.name })}
+              />
             </li>
           ))}
         </ul>
       ) : (
-        <WorldTable worlds={visible} starred={starred} onStar={toggleStar} />
+        <WorldTable
+          worlds={visible}
+          starred={starred}
+          onStar={toggleStar}
+          onDelete={(w) => setDeleting({ id: w.id, name: w.name })}
+        />
       )}
+
+      <DeleteWorldDialog world={deleting} onClose={() => setDeleting(null)} onDeleted={onDeleted} />
     </section>
   );
 }
@@ -200,14 +224,33 @@ function StarButton({
   );
 }
 
+/**
+ * Only worlds on the volume can be deleted; the sample worlds in `worlds.ts` are design
+ * placeholders with nothing behind them, so they get no delete control.
+ */
+function DeleteButton({ onClick, className = "" }: { onClick: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      aria-label="Delete world"
+      onClick={onClick}
+      className={`inline-flex size-7 items-center justify-center rounded-lg text-void-black/40 transition-colors duration-200 hover:bg-pink-tint hover:text-wander-pink ${className}`}
+    >
+      <Icon name="trash" size={15} />
+    </button>
+  );
+}
+
 function WorldCard({
   world,
   starred,
   onStar,
+  onDelete,
 }: {
   world: WorldView;
   starred: boolean;
   onStar: () => void;
+  onDelete: () => void;
 }) {
   const status = STATUS_META[world.status];
   const href = worldHref(world.id);
@@ -220,13 +263,21 @@ function WorldCard({
         <span className={`pill-sm absolute top-2 left-2 ${status.className}`}>
           {status.label}
         </span>
-        <StarButton
-          starred={starred}
-          onClick={onStar}
-          className={`absolute top-1.5 right-1.5 bg-pure-white/90 ${
-            starred ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          }`}
-        />
+        <div className="absolute top-1.5 right-1.5 flex items-center gap-1">
+          {world.live && (
+            <DeleteButton
+              onClick={onDelete}
+              className="bg-pure-white/90 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+            />
+          )}
+          <StarButton
+            starred={starred}
+            onClick={onStar}
+            className={`bg-pure-white/90 ${
+              starred ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+            }`}
+          />
+        </div>
       </div>
       <div className="p-3">
         <h3 className="truncate text-body-sm font-medium text-void-black">
@@ -252,10 +303,12 @@ function WorldTable({
   worlds,
   starred,
   onStar,
+  onDelete,
 }: {
   worlds: WorldView[];
   starred: Set<string>;
   onStar: (id: string) => void;
+  onDelete: (world: WorldView) => void;
 }) {
   return (
     <div className="card mt-5 overflow-x-auto p-0">
@@ -269,7 +322,7 @@ function WorldTable({
             <th className="px-4 py-2.5 text-right font-medium">Splats</th>
             <th className="px-4 py-2.5 font-medium">Edited</th>
             <th className="px-4 py-2.5 font-medium">People</th>
-            <th className="w-10 px-2 py-2.5" />
+            <th className="w-20 px-2 py-2.5" />
           </tr>
         </thead>
         <tbody>
@@ -308,7 +361,10 @@ function WorldTable({
                   </div>
                 </td>
                 <td className="px-2 py-2">
-                  <StarButton starred={starred.has(w.id)} onClick={() => onStar(w.id)} />
+                  <div className="flex items-center justify-end gap-0.5">
+                    {w.live && <DeleteButton onClick={() => onDelete(w)} />}
+                    <StarButton starred={starred.has(w.id)} onClick={() => onStar(w.id)} />
+                  </div>
                 </td>
               </tr>
             );

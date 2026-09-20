@@ -10,16 +10,17 @@ final class ProximityHapticProfileTests: XCTestCase {
         XCTAssertNotNil(profile.pulse(for: 1.5))
     }
 
-    func testCloserIsFasterStrongerSharper() {
+    func testCloserIsFasterAndAlwaysFullStrength() {
         let far = profile.pulse(for: 1.4)!
         let mid = profile.pulse(for: 0.8)!
         let near = profile.pulse(for: 0.35)!
         XCTAssertGreaterThan(far.interval, mid.interval)
         XCTAssertGreaterThan(mid.interval, near.interval)
-        XCTAssertLessThan(far.intensity, mid.intensity)
-        XCTAssertLessThan(mid.intensity, near.intensity)
-        XCTAssertLessThan(far.sharpness, mid.sharpness)
-        XCTAssertLessThan(mid.sharpness, near.sharpness)
+        for pulse in [far, mid, near] {
+            XCTAssertEqual(pulse.intensity, 1.0, accuracy: 0.001, "every buzz is full strength")
+            XCTAssertLessThan(pulse.duration, pulse.interval, "buzzes never overlap")
+            XCTAssertGreaterThanOrEqual(pulse.duration, 0.1, "long enough to feel through fabric")
+        }
     }
 
     func testEndpointsClamp() {
@@ -32,10 +33,18 @@ final class ProximityHapticProfileTests: XCTestCase {
         XCTAssertEqual(edge.intensity, profile.farIntensity, accuracy: 0.0001)
     }
 
-    func testSpeedUpIsConcentratedNearTheObstacle() {
-        // Halfway in distance should still be slower than halfway in interval.
+    func testSpeedUpIsGradual() {
+        // Halfway in distance is halfway in interval: a steady ramp, not a late jump.
         let half = profile.pulse(for: 0.9)!
         let midpoint = (profile.farInterval + profile.nearInterval) / 2
-        XCTAssertLessThan(half.interval, midpoint)
+        XCTAssertEqual(half.interval, midpoint, accuracy: 0.01)
+    }
+
+    func testProfileSpanningARangeStartsAtItsEdge() {
+        let short = ProximityHapticProfile.spanning(0.4)
+        XCTAssertNil(short.pulse(for: 0.45))
+        XCTAssertEqual(short.pulse(for: 0.4)!.interval, short.farInterval, accuracy: 0.0001)
+        XCTAssertEqual(short.pulse(for: 0.1)!.interval, short.nearInterval, accuracy: 0.0001)
+        XCTAssertGreaterThan(short.pulse(for: 0.3)!.interval, short.pulse(for: 0.2)!.interval)
     }
 }

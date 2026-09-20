@@ -13,5 +13,8 @@
     <string></string>
     <key>WorldId</key>
     <string></string>
+    <!-- The backend's VOICE_ACCESS_TOKEN for the Live voice guide; never the OpenAI key. -->
+    <key>VoiceAccessToken</key>
+    <string></string>
 </dict>
 </plist>

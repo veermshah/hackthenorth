@@ -59,3 +59,5 @@ jobs:
         run: python -m modal deploy -m services.backend.deployment.modal_app
       - name: Deploy annotation worker
         run: python -m modal deploy -m services.backend.deployment.modal_annotations
+      - name: Deploy visual localization service
+        run: python -m modal deploy -m services.backend.deployment.modal_localization

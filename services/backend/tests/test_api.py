@@ -1,3 +1,4 @@
+import json
 import time
 from fastapi.testclient import TestClient
 from ..app.main import create_app
@@ -22,6 +23,18 @@ def test_http_sessions_and_errors(settings):
         assert len(client.get('/destinations').json()['destinations']) == 8
         assert client.post(f'/legacy/sessions/{sid}/destination', json={'destination_id': 'east_elevator'}).status_code == 422
         assert client.post('/assistant/query', json={'session_id': sid, 'text': ''}).status_code == 422
+
+
+def test_assistant_query_stream_emits_deltas_then_a_final_event(settings):
+    with make_client(settings, model=ScriptedModel(['Hello there.'])) as client:
+        sid = client.post('/legacy/sessions', json={}).json()['session_id']
+        response = client.post('/assistant/query/stream', json={'session_id': sid, 'text': 'Hi'})
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        events = [json.loads(chunk[len('data: '):]) for chunk in response.text.strip().split('\n\n') if chunk]
+        # ScriptedModel has no real token deltas (it answers in one shot via the base
+        # AgentModel.stream() default), so the only event is the final payload.
+        assert events == [{'type': 'final', 'text': 'Hello there.', 'sources': [], 'actions': [], 'tool_calls': []}]
 
 
 def test_navigation_websocket_malformed_recovery_and_broadcast(settings):

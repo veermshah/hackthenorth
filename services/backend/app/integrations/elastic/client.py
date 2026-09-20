@@ -1,5 +1,8 @@
-from elasticsearch import AsyncElasticsearch
+import logging
+from elasticsearch import ApiError, AsyncElasticsearch
 from .mappings import mappings
+
+logger = logging.getLogger(__name__)
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -22,10 +25,18 @@ class ElasticClient:
         client = self.require()
         for name, mapping in mappings(self.settings.elastic_embedding_dims).items():
             if await client.indices.exists(index=name):
-                # Adding new fields to an existing mapping is safe; this keeps an
-                # index created before a schema addition (e.g. category/permanence)
-                # in sync without a manual migration step.
-                await client.indices.put_mapping(index=name, properties=mapping['properties'])
+                try:
+                    # Adding new fields to an existing mapping is safe; this keeps an
+                    # index created before a schema addition (e.g. category/permanence)
+                    # in sync without a manual migration step. Changing an EXISTING
+                    # field's type is not safe (ES rejects it) and would need a real
+                    # reindex; skip that index rather than blocking every other one
+                    # (indexing into map_entities must not fail because live_events
+                    # drifted, or vice versa).
+                    await client.indices.put_mapping(index=name, properties=mapping['properties'])
+                except ApiError as error:
+                    logger.warning('Skipping mapping update for %s (%s); a field type changed '
+                                   'incompatibly and needs a real reindex, not an automatic one', name, error)
             else:
                 await client.indices.create(index=name, mappings=mapping)
 

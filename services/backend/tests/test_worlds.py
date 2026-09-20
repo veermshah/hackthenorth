@@ -3,8 +3,10 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import json
+import math
 
 import pytest
+import trimesh
 from fastapi.testclient import TestClient
 from ..app.main import create_app
 from ..app.services.worlds import check, compute_route, world_graph
@@ -67,6 +69,23 @@ def test_graph_measurements_and_immutable_assets(client, world):
     assert client.put(url+'/v2/scene.spz', content=b'new').status_code == 201
     updated = client.patch(url, json={'version': 'v2'})
     assert updated.json()['assets']['splat'].endswith('/v2/scene.spz')
+
+
+def test_notes_round_trip(client, world):
+    url = '/worlds/demo-building/notes'
+    assert client.get(url).json()['notes'] == []
+    notes = {'schema': 'wander.notes/v1', 'worldId': 'demo-building', 'notes': [
+        {'id': 'n1', 'title': 'Broken handrail', 'location': 'Stairwell B',
+         'position': [1, 0, -2], 'createdAt': '2026-09-19T12:00:00Z'}]}
+    assert client.put(url, json=notes).status_code == 200
+    stored = client.get(url).json()
+    check(stored, 'notes.schema.json')
+    assert stored['notes'][0]['title'] == 'Broken handrail' and stored['updatedAt']
+    # worldId must match the path, and the payload must satisfy the contract.
+    assert client.put(url, json={**notes, 'worldId': 'other'}).status_code == 400
+    assert client.put(url, json={'schema': 'wander.notes/v1', 'worldId': 'demo-building',
+                                 'notes': [{'title': 'no id'}]}).status_code == 400
+    assert client.get('/worlds/missing/notes').status_code == 404
 
 
 def test_weighted_directed_routing_and_heading(world):
@@ -216,6 +235,26 @@ def test_publish_reindexes_and_notes_hazards_without_a_separate_index_call(setti
     assert 'hazard-1' in indexed_ids
 
 
+def test_saving_notes_reindexes_them_so_hand_placed_pins_are_searchable(settings, world):
+    path = settings.wander_data_root / 'worlds' / world['id'] / 'world.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(world), encoding='utf-8')
+    stub = SimpleNamespace(
+        inference=SimpleNamespace(inference=AsyncMock(return_value={'text_embedding': [{'embedding': [1, 0, 0]}]})),
+        index=AsyncMock(), close=AsyncMock(),
+        indices=SimpleNamespace(exists=AsyncMock(return_value=True), create=AsyncMock(), put_mapping=AsyncMock()))
+    elastic = ElasticClient(settings, stub)
+    with TestClient(create_app(settings, model=ScriptedModel([]), events=FixtureEvents(), search=FixtureSearch(),
+                              elastic=elastic), headers={'X-API-Key': settings.wander_api_key}) as client:
+        notes = {'schema': 'wander.notes/v1', 'worldId': world['id'], 'notes': [
+            {'id': 'bed-1', 'title': 'Bed 1', 'location': 'North wall', 'position': [1, 0, 2],
+             'createdAt': '2026-09-19T12:00:00Z'}]}
+        assert client.put(f"/worlds/{world['id']}/notes", json=notes).status_code == 200
+    assert stub.index.await_count >= 1
+    document = stub.index.await_args_list[-1].kwargs['document']
+    assert document['id'] == 'bed-1' and document['name'] == 'Bed 1' and document['is_destination'] is False
+
+
 def test_agent_can_read_persisted_world_session(client):
     sid = client.post('/sessions', json={'worldId': 'demo-building', 'deviceId': 'phone'}).json()['sessionId']
     result = client.post('/assistant/query', json={'session_id': sid, 'text': 'Where am I?'})
@@ -250,3 +289,204 @@ def test_api_key_unconfigured_is_not_an_auth_bypass(settings):
     settings.wander_api_key = ''
     with TestClient(create_app(settings, model=ScriptedModel([]), events=FixtureEvents())) as client:
         assert client.get('/health').status_code == 401
+
+
+def test_first_instruction_is_relative_to_heading(world):
+    world['navigationGraph'] = {'nodes': [{'id': 'a', 'position': [0,0,0]}, {'id': 'b', 'position': [10,0,0]}],
+                                'edges': [{'from': 'a', 'to': 'b'}]}
+    facing_east = compute_route(world, {'from': 'a', 'to': 'b', 'headingDeg': 90})
+    assert facing_east['instructions'][0]['turn'] == 'straight'
+    facing_north = compute_route(world, {'from': 'a', 'to': 'b', 'headingDeg': 0})
+    assert facing_north['instructions'][0]['turn'] == 'right'
+    facing_west = compute_route(world, {'from': 'a', 'to': 'b', 'headingDeg': 270})
+    assert facing_west['instructions'][0]['turn'] == 'u-turn'
+    assert compute_route(world, {'from': 'a', 'to': 'b'})['instructions'][0]['turn'] == 'straight'
+
+
+def test_yaw_matches_leg_heading_convention():
+    from ..app.routing.heading import yaw, bearing, legacy_heading
+    assert yaw([0,0,0,1]) == pytest.approx(0)                       # camera looks down -Z
+    assert yaw([0,-math.sqrt(.5),0,math.sqrt(.5)]) == pytest.approx(90)  # -90° about Y turns -Z into +X
+    assert bearing([0,0,0], [1,0,0]) == pytest.approx(90)
+    assert legacy_heading(0) == 180 and legacy_heading(90) == 270
+
+
+def test_chest_height_pose_uses_horizontal_thresholds_and_speaks_turns(client):
+    graph = {'nodes': [{'id': 'a', 'position': [0,0,0]}, {'id': 'b', 'position': [0,0,-10]},
+                       {'id': 'c', 'position': [10,0,-10], 'kind': 'destination'}],
+             'edges': [{'from': 'a', 'to': 'b'}, {'from': 'b', 'to': 'c'}]}
+    client.put('/worlds/demo-building/graph', json=graph)
+    sid = client.post('/sessions', json={'worldId': 'demo-building', 'deviceId': 'phone', 'destination': 'c'}).json()['sessionId']
+    start = datetime.now(timezone.utc)-timedelta(seconds=10)
+    east = [0, -math.sqrt(.5), 0, math.sqrt(.5)]
+    def update(seconds, point, rotation=(0,0,0,1)):
+        result = client.post(f'/sessions/{sid}/pose', json={'timestamp': (start+timedelta(seconds=seconds)).isoformat(),
+            'trackingState': 'localized', 'pose': {'position': point, 'rotation': list(rotation)}})
+        assert result.status_code == 200, result.text
+        return result.json()
+    first = update(0, [0, 1.3, 0])
+    assert first['state'] == 'navigating' and first['headingDeg'] == pytest.approx(0)
+    assert first['instruction']['turn'] == 'straight' and first['speak'] == first['instruction']['text']
+    assert first['distanceToNextMetres'] == pytest.approx(10)
+    # Same leg, same heading: nothing new to say.
+    assert 'speak' not in update(1, [0, 1.3, -4])
+    # Reaching b 1.3 m above the floor still counts; facing north, c is to the right.
+    at_b = update(2, [0, 1.3, -10])
+    assert at_b['nextNode']['id'] == 'c' and at_b['instruction']['turn'] == 'right' and 'speak' in at_b
+    # Turning to face east settles into 'straight' and is spoken once.
+    turned = update(6, [0, 1.3, -10], east)
+    assert turned['instruction']['turn'] == 'straight' and 'speak' in turned
+    assert 'speak' not in update(7, [3, 1.3, -10], east)
+    assert update(8, [10, 1.3, -10], east)['state'] == 'arrived'
+
+
+def test_mesh_upload_registers_and_navmesh_proposal_stays_unpublished(client, world):
+    url = '/worlds/demo-building'
+    assert client.post(url+'/navmesh', json={}).status_code == 409
+    # 8 m × 6 m room: floor slab at y=0, walls around, one wall across the middle with a 1.4 m gap.
+    parts = []
+    for size, centre in [((8.4, .1, 6.4), (0, -.05, 0)), ((.2, 2.5, 6.4), (-4.1, 1.25, 0)), ((.2, 2.5, 6.4), (4.1, 1.25, 0)),
+                         ((8.4, 2.5, .2), (0, 1.25, -3.1)), ((8.4, 2.5, .2), (0, 1.25, 3.1)),
+                         ((.2, 2.5, 2.3), (0, 1.25, -1.85)), ((.2, 2.5, 2.3), (0, 1.25, 1.85))]:
+        box = trimesh.creation.box(extents=size)
+        box.apply_translation(centre)
+        parts.append(box)
+    assert client.put(url+'/v1/mesh.glb', content=trimesh.util.concatenate(parts).export(file_type='glb')).status_code == 201
+    assert client.get(url).json()['assets']['mesh'] == 'worlds/demo-building/v1/mesh.glb'
+    assert client.get(url+'/navmesh').status_code == 404
+
+    proposal = client.post(url+'/navmesh', json={'params': {'cell': .2}})
+    assert proposal.status_code == 201, proposal.text
+    proposal = proposal.json()
+    assert proposal['status'] == 'proposed' and proposal['params']['cell'] == .2
+    assert len(proposal['graph']['nodes']) >= 4 and proposal['graph']['edges']
+    assert proposal['grid']['walkableCells'] > 0
+    assert client.get(url+'/navmesh').json()['createdAt'] == proposal['createdAt']
+    # The live graph is untouched until a reviewer PUTs the proposal.
+    assert client.get(url).json()['navigationGraph'] == world['navigationGraph']
+    assert client.put(url+'/graph', json=proposal['graph']).status_code == 200
+    assert len(client.get(url).json()['navigationGraph']['nodes']) == len(proposal['graph']['nodes'])
+
+    # Validation: a floating node and an edge straight through the divider; snapping is returned, not saved.
+    graph = {'nodes': [{'id': 'w', 'position': [-2, 1.4, 0]}, {'id': 'e', 'position': [2, 0, 2]}],
+             'edges': [{'from': 'w', 'to': 'e'}]}
+    result = client.post(url+'/graph/validate', json={'graph': graph, 'params': {'cell': .2}})
+    assert result.status_code == 200, result.text
+    kinds = {(i['kind'], i.get('node') or (i.get('from'), i.get('to'))) for i in result.json()['issues']}
+    assert ('edge-through-wall', ('w', 'e')) in kinds and ('node-height', 'w') in kinds
+    assert result.json()['graph']['nodes'][0]['position'][1] == pytest.approx(0, abs=.03)
+    assert client.get(url).json()['navigationGraph']['nodes'][0]['id'] != 'w'
+    assert client.post(url+'/graph/validate', json={'params': {'cell': -1}}).status_code == 422
+
+
+def two_floor_graph():
+    """Ground floor a-b-c; stairs at b and an elevator at c both reach floor 2, which leads to the goal."""
+    return {'nodes': [
+        {'id': 'a', 'position': [0, 0, 0], 'floor': '1'},
+        {'id': 'b', 'position': [0, 0, -10], 'floor': '1'},
+        {'id': 'c', 'position': [10, 0, -10], 'floor': '1'},
+        {'id': 'b2', 'position': [0, 4, -10], 'floor': '2'},
+        {'id': 'c2', 'position': [10, 4, -10], 'floor': '2'},
+        {'id': 'goal', 'position': [0, 4, -20], 'floor': '2', 'kind': 'destination'}],
+        'edges': [
+        {'from': 'a', 'to': 'b'}, {'from': 'b', 'to': 'c'},
+        {'from': 'b', 'to': 'b2', 'kind': 'stairs'},
+        {'from': 'c', 'to': 'c2', 'kind': 'elevator'},
+        {'from': 'c2', 'to': 'b2'}, {'from': 'b2', 'to': 'goal'}]}
+
+
+def test_accessible_only_skips_stairs_and_takes_the_elevator(world):
+    world['navigationGraph'] = two_floor_graph()
+    stairs = compute_route(world, {'from': 'a', 'to': 'goal'})
+    assert [n['id'] for n in stairs['nodes']] == ['a', 'b', 'b2', 'goal']
+    assert stairs['legs'][1]['kind'] == 'stairs' and 'kind' not in stairs['legs'][0]
+    assert stairs['instructions'][1] == {'atNode': 'b', 'turn': 'stairs', 'text': 'Take the stairs to floor 2.',
+                                         'distanceMetres': 10}
+    check(stairs, 'navigation.schema.json', '#/$defs/routeResponse')
+    lift = compute_route(world, {'from': 'a', 'to': 'goal', 'accessibleOnly': True})
+    assert [n['id'] for n in lift['nodes']] == ['a', 'b', 'c', 'c2', 'b2', 'goal']
+    assert lift['instructions'][2]['turn'] == 'elevator'
+    # Coming out of the elevator, the turn is measured from the way in (east), so b2 is behind: u-turn.
+    assert lift['instructions'][3]['turn'] == 'u-turn'
+    # A free start next to the stairwell snaps to the corridor, never onto the stairs edge.
+    assert [n['id'] for n in compute_route(world, {'from': [0, 2, -10], 'to': 'goal'})['nodes']][:2] == ['b', 'b2']
+    # Explicit `accessible` beats the kind default: a stepped corridor is excluded, a stair-lift allowed.
+    world['navigationGraph']['edges'][4]['accessible'] = False
+    world['navigationGraph']['edges'][2]['accessible'] = True
+    assert [n['id'] for n in compute_route(world, {'from': 'a', 'to': 'goal', 'accessibleOnly': True})['nodes']] == \
+        ['a', 'b', 'b2', 'goal']
+    world['navigationGraph']['edges'][2]['accessible'] = False
+    with pytest.raises(Exception) as error:
+        compute_route(world, {'from': 'a', 'to': 'goal', 'accessibleOnly': True})
+    assert error.value.status_code == 422 and 'without stairs' in error.value.detail
+
+
+def test_cross_floor_walk_edges_are_rejected(client):
+    graph = two_floor_graph()
+    graph['edges'][2] = {'from': 'b', 'to': 'b2'}
+    result = client.put('/worlds/demo-building/graph', json=graph)
+    assert result.status_code == 400 and 'joins floors 1 and 2' in result.json()['detail']
+    assert client.put('/worlds/demo-building/graph', json=two_floor_graph()).status_code == 200
+
+
+def test_session_accessible_only_persists_and_vertical_legs_wait_for_the_storey(client):
+    client.put('/worlds/demo-building/graph', json=two_floor_graph())
+    assert client.post('/sessions', json={'worldId': 'demo-building', 'deviceId': 'p', 'accessibleOnly': 'yes'}).status_code == 400
+    session = client.post('/sessions', json={'worldId': 'demo-building', 'deviceId': 'phone', 'destination': 'goal',
+                                            'accessibleOnly': True}).json()
+    check(session, 'navigation.schema.json', '#/$defs/session')
+    assert session['accessibleOnly'] is True
+    sid = session['sessionId']
+    start = datetime.now(timezone.utc)-timedelta(seconds=10)
+    def update(seconds, point):
+        result = client.post(f'/sessions/{sid}/pose', json={'timestamp': (start+timedelta(seconds=seconds)).isoformat(),
+            'trackingState': 'localized', 'pose': {'position': point, 'rotation': [0, 0, 0, 1]}})
+        assert result.status_code == 200, result.text
+        return result.json()
+    first = update(0, [0, 1.3, 0])
+    assert [n['id'] for n in client.get(f'/sessions/{sid}').json()['route']['nodes']] == ['a', 'b', 'c', 'c2', 'b2', 'goal']
+    assert first['nextNode']['id'] == 'b'
+    assert update(1, [0, 1.3, -10])['nextNode']['id'] == 'c'
+    # Standing at the ground-floor elevator door: told to take it, and the leg does not advance until floor 2.
+    at_c = update(2, [10, 1.3, -10])
+    assert at_c['instruction']['turn'] == 'elevator' and at_c['speak'] == 'Take the elevator to floor 2.'
+    assert update(3, [10, 1.3, -10])['nextNode']['id'] == 'c2'
+    upstairs = update(8, [10, 5.3, -10])
+    assert upstairs['nextNode']['id'] == 'b2' and upstairs['instruction']['turn'] != 'elevator'
+    assert update(10, [0, 5.3, -10])['nextNode']['id'] == 'goal'
+    assert update(12, [0, 5.3, -20])['state'] == 'arrived'
+
+
+def test_splat_graph_validation_result_is_not_transformed_twice(world):
+    world['alignment'] = {'frame': 'niantic-vps', 'position': [10, 0, 0], 'rotation': [0, 0, 0, 1], 'scale': 1}
+    world['navigationGraph'] = {'frame': 'splat', 'nodes': [{'id': 'a', 'position': [1, 0, 0]}], 'edges': []}
+    converted = world_graph(world)
+    assert converted['frame'] == 'world'
+    assert converted['nodes'][0]['position'] == [11, 0, 0]
+    assert world_graph({**world, 'navigationGraph': converted}) == converted
+
+
+def test_proposal_preserves_places_and_rejects_stale_acceptance(client):
+    url = '/worlds/demo-building'
+    graph = {'nodes': [
+        {'id': 'entrance', 'name': 'Entrance', 'kind': 'entrance', 'position': [-2, 0, 0]},
+        {'id': 'desk', 'name': 'Desk', 'kind': 'destination', 'position': [2, 0, 0]},
+    ], 'edges': [{'from': 'entrance', 'to': 'desk'}]}
+    assert client.put(url + '/graph', json=graph).status_code == 200
+    mesh = trimesh.creation.box(extents=(8, .1, 6))
+    mesh.apply_translation((0, -.05, 0))
+    assert client.put(url + '/v1/mesh.glb', content=mesh.export(file_type='glb')).status_code == 201
+    response = client.post(url + '/navmesh', json={})
+    assert response.status_code == 201, response.text
+    proposal = response.json()
+    assert proposal['proposalIssues'] == []
+    assert {p['id'] for p in proposal['places'] if p['connected']} == {'entrance', 'desk'}
+    assert client.get(url).json()['navigationGraph'] == graph
+    assert client.put(url + '/graph', json=proposal['graph'], headers={'If-Match': proposal['sourceRevision']}).status_code == 200
+    # Replaying the old preview cannot overwrite a graph changed since generation.
+    response = client.put(url + '/graph', json=proposal['graph'], headers={'If-Match': proposal['sourceRevision']})
+    assert response.status_code == 412
+    # A new mesh alignment also invalidates an otherwise-current preview.
+    proposal = client.post(url + '/navmesh', json={}).json()
+    assert client.patch(url, json={'meshFrame': 'splat'}).status_code == 200
+    assert client.put(url + '/graph', json=proposal['graph'], headers={'If-Match': proposal['sourceRevision']}).status_code == 412
