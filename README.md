@@ -18,6 +18,7 @@ Built at Hack the North by four people in one weekend. Not a replacement for the
 - [Accomplishments we're proud of](#accomplishments-were-proud-of)
 - [What we learned](#what-we-learned)
 - [What's next](#whats-next-for-wander)
+- [Team & my role](#team--my-role)
 
 ## Inspiration
 
@@ -172,6 +173,25 @@ Requires a LiDAR iPhone for the front role — ARKit and the Niantic SDK don't r
 - **Multi-floor worlds** with elevator and stair transitions.
 - **Real users.** This is our best guess at what helps. The next version should be shaped by blind travellers, not by four sighted people at a hackathon.
 - **More buildings.** Scaling means scanning more places, not rebuilding the pipeline.
+
+## Team & my role
+
+Built at Hack the North 2026 by:
+
+- **Caleb Bae** ([@balebbae](https://github.com/balebbae))
+- **Alan Roybal** ([@AlanRoybal](https://github.com/AlanRoybal))
+- **Veer Shah** ([@veermshah](https://github.com/veermshah))
+- **Ayro Escobar** ([@AyroEscobar](https://github.com/AyroEscobar))
+
+**My part (Veer):** mostly the backend in `services/backend/`, plus the assistant pieces of the web app.
+
+- Wrote the first version of the navigation backend: FastAPI, the OpenAI Responses agent and its function tools, and the Elasticsearch context and retrieval layer, including the aggregation and context-search tools.
+- Automated the Modal scan pipeline, and added self-hosted visual localization and Gaussian splat training on Modal.
+- Set up the GitHub Actions workflow that runs the backend tests and deploys to Modal when `main` goes green.
+- Built the web chat UI for the building assistant (the Ask tab). It streams responses, grounds "what's in view" in the web camera, and has a mobile voice-call mode.
+- Made scene objects auto-detect into note pins, and indexed every note for search.
+
+Caleb led the companion web app and worked across the iOS app and backend. Alan led the iOS app and the Niantic SDK integration. Ayro built the marketing site and frontend UI polish.
 
 ## License
 
